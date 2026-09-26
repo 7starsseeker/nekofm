@@ -437,14 +437,16 @@ class BrowserDanmakuChannel {
     } finally { release(); }
   }
 
-  async _startInner({ roomId, signUrl, urlProvider, onFrame, onState }) {
+  async _startInner({ roomId, signUrl, urlProvider, onFrame, onState, cookie }) {
     this.stop();                 // 换房间先收掉上一条
     this._stopped = false;
     /**
      * 记住参数：浏览器可能整组自己退出（实测过 —— 窗口在屏幕外、长时间无交互，
      * 某个时刻 Edge 进程就没了），那时要按同样配置重新走一遍建连流程。
      */
-    this._params = { roomId, signUrl, urlProvider, onFrame, onState };
+    this._params = { roomId, signUrl, urlProvider, onFrame, onState, cookie };
+    /** B站登录 cookie：注入进页面用（那个 Edge profile 自己没登录态，否则会被当游客） */
+    this.cookie = cookie || '';
     await this._bringUp();
     return { stop: () => this.stop() };
   }
@@ -467,7 +469,9 @@ class BrowserDanmakuChannel {
     const inject = async (url) => {
       await this._eval(`(${PAGE_CLIENT.toString()})()`);
       await this._eval(
-        `window.__nekofmDanmaku.start(${JSON.stringify(url)}, ${Number(roomId)})`,
+        // 第三个参数：把主进程那边的登录 cookie 带进页面（见 PAGE_CLIENT 的 applyCookie）。
+        // 不带就会以"游客"身份连弹幕，昵称被打码、uid 恒为 0。
+        `window.__nekofmDanmaku.start(${JSON.stringify(url)}, ${Number(roomId)}, ${JSON.stringify(this.cookie || '')})`,
         { awaitPromise: true }
       );
     };
@@ -525,6 +529,16 @@ class BrowserDanmakuChannel {
           } catch (e) { this.log('[danmaku-ch] 刷新签名失败:', e.message); }
         }
         if (s.state !== lastState) { lastState = s.state; if (onState) onState(s); }
+        /**
+         * 身份只在**连上那一刻**报一次：这是"弹幕为什么认不出主播"的第一现场证据。
+         * uid=0 表示页面侧仍是游客（cookie 没注入成功 / 没登录）—— 那时 B站下发的
+         * 昵称一定带星号、每条弹幕的 sender uid 也是 0。
+         */
+        if (!this._uidLogged && s.state === 'open') {
+          this._uidLogged = true;
+          this.log(`[danmaku-ch] 页面侧弹幕身份 uid=${s.uid || 0}`
+            + `${s.uid ? '（已登录，昵称应为真名）' : '（游客态：昵称会被打码、弹幕 uid 会是 0）'}`);
+        }
       } catch (e) {
         if (this._gen !== gen || this._stopped) return;
         this._onChannelError(e);
@@ -636,6 +650,8 @@ function PAGE_CLIENT() {
   const st = {
     state: 'idle', err: '', frames: [], received: 0,
     ws: null, hb: null, retry: 0, closed: true, signUrl: '', roomId: 0, timer: null,
+    /** 本会话的登录 uid（0 = 游客）；由 start() 注入 cookie 后读出 */
+    uid: 0,
   };
 
   /** ArrayBuffer → base64（分块，避免大包把调用栈打爆） */
@@ -662,6 +678,32 @@ function PAGE_CLIENT() {
   };
 
   const clearHb = () => { if (st.hb) { clearInterval(st.hb); st.hb = null; } };
+
+  /**
+   * 把主进程那边的 B站登录 cookie **同步进这个页面**。
+   *
+   * 为什么必须同步（2026-09-26 实测）：这个页面跑在一个**独立的 Edge profile** 里，
+   * 它自己没有登录态 —— 于是 token 请求（`credentials: 'include'`）与弹幕 WebSocket
+   * 都是**匿名会话**，B站下发的弹幕昵称全被打码（`飞***`），uid 字段也是 0，
+   * 结果"主播认不出来"。主进程那边明明有 SESSDATA，只是没传进来。
+   *
+   * 页面在 `live.bilibili.com` 上，所以可以直接给 `.bilibili.com` 写 cookie ✓
+   * （JS 只能写当前域及其父域，正好够用）。写完**无需刷新**：后续 fetch / WebSocket
+   * 会自动带上（token 请求就在 connect() 里，晚于本函数）。
+   *
+   * @returns {number} 注入后从页面 cookie 里读到的 uid（拿不到就是 0）
+   */
+  const applyCookie = (raw) => {
+    if (!raw) return 0;
+    const keep = /^(SESSDATA|bili_jct|DedeUserID|DedeUserID__ckMd5|sid|__csrf)$/;
+    for (const part of String(raw).split(';')) {
+      const kv = part.trim();
+      const i = kv.indexOf('=');
+      if (i <= 0 || !keep.test(kv.slice(0, i))) continue;
+      try { document.cookie = kv + '; domain=.bilibili.com; path=/'; } catch (e) { /* 忽略 */ }
+    }
+    return Number((document.cookie.match(/(?:^|;\s*)DedeUserID=(\d+)/) || [])[1]) || 0;
+  };
 
   const scheduleRetry = () => {
     if (st.closed) return;
@@ -707,7 +749,14 @@ function PAGE_CLIENT() {
       st.state = 'open';
       st.err = '';
       ws.send(packet(7, {
-        uid: 0, roomid: st.roomId, protover: 3, buvid,
+        /**
+         * **uid 必须是真实的登录 uid，不能是 0。**
+         * 写死 0 时 B站把这条连接当游客：收到的弹幕昵称全被打码（`飞***`）、
+         * 每条弹幕的 uid 字段也是 0 —— 于是"主播/房管"这类身份判据全部失效
+         * （2026-09-26 用户实测：主播自己发言被回"该指令需要房管/主播权限"）。
+         * `st.uid` 来自 start() 注入的登录 cookie（见 applyCookie）。
+         */
+        uid: st.uid || 0, roomid: st.roomId, protover: 3, buvid,
         support_ack: true, queue_uuid: Math.random().toString(36).slice(2, 10),
         scene: 'room', platform: 'web', type: 2, key: token,
       }));
@@ -730,11 +779,19 @@ function PAGE_CLIENT() {
   };
 
   window[KEY] = {
-    start: (signUrl, roomId) => {
+    /**
+     * @param {string} signUrl getDanmuInfo 的签名地址（主进程生成）
+     * @param {number} roomId
+     * @param {string} [cookie] 主进程那边的 B站登录 cookie —— 同步进页面，
+     *   让 token 请求与弹幕 WebSocket 都带上登录态（否则会被当游客、昵称打码）。
+     *   见 applyCookie 的说明。
+     */
+    start: (signUrl, roomId, cookie) => {
       st.closed = false;
       st.roomId = roomId;
       st.signUrl = signUrl;
       st.retry = 0;
+      st.uid = applyCookie(cookie);
       connect();
     },
     setUrl: (signUrl) => {
@@ -753,7 +810,12 @@ function PAGE_CLIENT() {
       st.state = 'stopped';
     },
     drain: () => { const f = st.frames; st.frames = []; return f; },
-    snapshot: () => ({ state: st.state, err: st.err, received: st.received }),
+    /**
+     * `uid` = 页面侧认定的登录身份（0 = 游客）。
+     * 它直接决定 B站给不给我们**真实昵称与 sender uid** —— 是"主播认不出来"那类问题的
+     * 唯一现场证据（2026-09-26 实测：写死 0 时收到的每条弹幕都是 `uid=0` + 打码昵称）。
+     */
+    snapshot: () => ({ state: st.state, err: st.err, received: st.received, uid: st.uid }),
   };
   return KEY;
 }

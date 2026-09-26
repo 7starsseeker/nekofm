@@ -516,6 +516,26 @@ class SelfTest {
             const rs = await Promise.all(['/', '/overlay', '/player', '/shared/lyric-sync.js'].map((p) => fetch(base + p)));
             return { ok: rs.every((r) => r.status === 200), detail: rs.map((r) => r.status).join('/') };
           } },
+          /**
+           * 弹幕身份的**源码闸门**（2026-09-26 加）。
+           *
+           * 真实事故：浏览器通道的认证包把 `uid` 写死成 `0` → B站按游客对待 →
+           * 收到的弹幕昵称全被打码（`飞***`）、每条弹幕的 sender uid 也是 0 →
+           * 主播自己发指令被判"需要房管/主播权限"。
+           * 修法：把登录 cookie 注入进那个（独立 profile、本来没登录态的）页面，
+           * 并用页面侧读到的 `DedeUserID` 当认证 uid。
+           * 这条检查守住两件事：**不能再写死 0**、**注入代码必须在**。
+           */
+          { id: 'danmakuIdentity', name: '弹幕身份不写死为游客（源码闸门）', run: () => {
+            const src = fs.readFileSync(path.join(__dirname, '..', 'core', 'bilibili', 'browser-channel.js'), 'utf8');
+            const hardcoded = /uid:\s*0\s*,\s*roomid/.test(src);
+            const hasInject = src.includes('applyCookie');
+            const usesUid = /uid:\s*st\.uid/.test(src);
+            return {
+              ok: !hardcoded && hasInject && usesUid,
+              detail: `写死 uid:0=${hardcoded ? '仍在（危险）' : '无'} · cookie 注入=${hasInject ? '有' : '丢失'} · 用页面侧 uid=${usesUid ? '是' : '否'}`,
+            };
+          } },
           { id: 'logsPage', name: '运行日志窗口（页面 + 日志接口）', run: async () => {
             /**
              * 打包成 exe 后没有控制台，这个窗口是用户唯一能自查的地方

@@ -445,6 +445,15 @@ class Engine extends EventEmitter {
       roomId: info.roomId,
       signUrl: await this.danmakuSignUrl(info.roomId),
       urlProvider: (rid) => this.danmakuSignUrl(rid),
+      /**
+       * 把登录 cookie 交给浏览器通道，由它注入进页面。
+       *
+       * 为什么必须给：那个 Edge profile 是独立的、**没有 B站登录态** ——
+       * 不带 cookie 时弹幕 WebSocket 落地就是"游客会话"，B站下发的昵称全部打码
+       * （`飞***`）、每条弹幕的 uid 也是 0，于是主播/房管身份判据全失效
+       * （2026-09-26 用户实测：主播自己发言被回"该指令需要房管/主播权限"）。
+       */
+      cookie: this.config.bilibili.cookie || '',
       onFrame: (buf) => dc.feed(buf),
       onState: (s) => {
         if (s.state === 'open') this.notify('info', `弹幕已连接（房间 ${info.roomId}）`);
