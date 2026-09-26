@@ -514,7 +514,7 @@
       <button id="btnSaveCacheDir" class="primary">保存</button>
     </div>
     <div class="tip" id="cacheDirNow">当前目录：—</div>
-    <div class="tip">歌曲音频、封面、歌词**都放在这个目录下面**。默认在程序目录里，
+    <div class="tip">歌曲音频、封面、歌词<b>都放在这个目录下面</b>。默认在程序目录里，
       <b>不会写到 C 盘</b>；想放别的大盘上就换一个目录（换目录不会删除旧文件）。</div>
     <div class="tip">首次播放仍走远端直链（不卡声音），后台落盘；下次点同一首直接读本地，
       不受直链过期影响。<b>45 秒试听片段不会缓存</b>。</div>
@@ -575,10 +575,10 @@
         只保留两个主题（2026-09-26 用户定的）：
           · 单行滚动 —— 纯原文，当前行高亮
           · 双语     —— 双行 + 中文翻译
-        原来的「逐字卡拉OK」「桌面歌词风」已去掉：前者用户不需要，
+        原来的「逐字卡拉OK」「桌面歌词风」已去掉：前者对应的**逐字染色渲染已整体下线**
+        （连主题带开关一起去掉了，见 README 第 2 节第 11 条），
         后者**只在直播画面里有区别**、在控制台歌词条里跟别的长得一样，
-        留着只会让人以为是坏的。逐字染色现在由「逐字」勾选框独立控制，
-        不再绑在主题上（所以"双语 + 逐字"这种组合依然可用）。
+        留着只会让人以为是坏的。
       -->
       <select id="oTheme" style="flex:1">
         <option value="scroll">单行滚动（纯原文 + 当前行高亮）</option>
@@ -589,20 +589,26 @@
     <div class="row">
       <label class="tip"><input id="oScaleFont" type="checkbox" /> 字号随源尺寸缩放（只有"源铺满整个画面"时才勾）</label>
     </div>
-    <div class="tip">默认**不勾**：字号就是上面滑块的值 —— 配合「把浏览器源的框设成组件尺寸」用，
+    <div class="tip">默认<b>不勾</b>：字号就是上面滑块的值 —— 配合「把浏览器源的框设成组件尺寸」用，
       框设多大、字幕就正好占多大，所见即所得。<br />
       勾上则按源高等比缩放（1080p 基准），适合把源铺满整个画面的用法。</div>
     <div class="tip" id="oBoxHint">—</div>
     <div class="row"><label class="lbl">透明度</label><input id="oOpacity" type="range" min="10" max="100" /><span id="oOpTxt" class="tip"></span></div>
     <div class="row"><label class="lbl">歌词底板</label><input id="oBackdrop" type="range" min="0" max="95" /><span id="oBdTxt" class="tip"></span></div>
-    <div class="row"><label class="lbl">底板颜色</label><input id="oBdColor" class="swatch" type="color" /></div>
-    <div class="tip">「歌词底板」给字幕垫一条半透明深色带 —— 文字融进画面时（比如浅青高亮落在青蓝色游戏画面上）这是**最稳**的一招，
-      任意背景都看得清。0 = 关；<b>35~55</b> 最常用。</div>
+    <div class="tip">「歌词底板」给字幕垫一条半透明色带 —— 文字融进画面时（比如浅青高亮落在青蓝色游戏画面上）
+      这是<b>最稳</b>的一招，任意背景都看得清。0 = 关；<b>35~55</b> 最常用。</div>
+    <div class="row">
+      <label class="lbl">底板颜色</label><input id="oBdColor" class="swatch" type="color" />
+      <span class="tip">垫在字幕底下那条色带的颜色</span>
+    </div>
     <div class="row">
       <label class="lbl">正文色</label><input id="oColor" class="swatch" type="color" />
       <label class="lbl">高亮色</label><input id="oActive" class="swatch" type="color" />
       <label class="lbl">描边色</label><input id="oStroke" class="swatch" type="color" />
     </div>
+    <div class="tip">三个颜色各管一块，互不影响：<b>正文色</b> = 非当前行
+      （注意当前行<b>不受它影响</b>）；<b>高亮色</b> = 正在唱的这一句，含它的翻译行；
+      <b>描边色</b> = 所有歌词文字的描边（粗细由下面的「描边宽」定）。</div>
     <div class="row">
       <label class="lbl">描边宽</label><input id="oStrokeW" type="range" min="0" max="12" /><span id="oSwTxt" class="tip"></span>
     </div>
@@ -782,7 +788,7 @@
 <!--
   底部歌词条：固定在播放器**下面**（窗口最底边），当播放器用的时候也能看词。
   数据源与直播姬的叠加层完全一致（同一份 /shared/lyric-sync.js + 同一条 SSE），
-  所以两边显示的行、逐字进度一定是对齐的 —— 不会出现"控制台和画面不同步"。
+  所以两边显示的行、当前句一定是对齐的 —— 不会出现"控制台和画面不同步"。
 -->
 <div class="lyric-strip" id="lyricStrip" hidden>
   <div class="ls-side"></div>

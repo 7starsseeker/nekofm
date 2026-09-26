@@ -987,7 +987,8 @@
    *   scroll（单行滚动）→ 纯原文，当前行高亮
    *   dual  （双语）    → 双行 + 中文翻译
    *
-   * 「逐字」不再绑主题：它由勾选框独立控制，所以"双语 + 逐字"依然可用。
+   * 逐字染色整体已下线（2026-09-26），所以现在**没有「逐字」勾选框** ——
+ * 主题只剩「单行滚动 / 双语」，两者差别就是有没有翻译行。
    */
   const THEME_PRESETS = {
     scroll: { showTranslation: false, showRoma: false },   // 纯原文
@@ -1807,10 +1808,12 @@
       if (!foreign.length && elapsed < 3000) return;
       const list = [...new Set(foreign)].slice(0, 4).join('、');
       if (foreign.length) {
-        log('error', `检测到页面被注入了 ${foreign.length} 个**非本机脚本**（${list}）——`
+        // 注：这个日志面板是 textContent 渲染的 —— 这里不能写 Markdown 的 `**` （会原样显示星号），
+        // 也不能写 `<b>`（会被当成普通文字）。强调一律用中文引号。
+        log('error', `检测到页面被注入了 ${foreign.length} 个「非本机脚本」（${list}）——`
           + '通常是过滤软件（如 AdGuard）注入了 userscript。'
           + '它会阻塞页面解析、让界面和图片显示不出来。'
-          + '请在过滤软件里把「127.0.0.1」或本程序加入**白名单/不做过滤**。');
+          + '请在过滤软件里把「127.0.0.1」或本程序加入「白名单 / 不做过滤」。');
       }
       if (elapsed >= 3000) {
         log('warn', `本次页面加载耗时 ${(elapsed / 1000).toFixed(1)} 秒（正常应 <1 秒）——`

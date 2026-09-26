@@ -273,7 +273,7 @@
    *     连接池只有 6 条，而且 control / player / 每个预览窗各占一条 SSE
    *     （SSE 是长连接，一直占着）。5Hz 足够：叠加层是
    *     `snapshot{position, serverTime, rate}` + rAF 插值，
-   *     两次上报之间用 serverTime 外推，逐字同步精度不受影响。
+   *     两次上报之间用 serverTime 外推，歌词同步精度不受影响。
    *   · 再用 `postThrottled` 保证**同一时刻最多一个在飞** ——
    *     绝不因为某次卡住而把连接池堆满（那正是"播放器失去响应"的成因）。
    */

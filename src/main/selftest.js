@@ -288,7 +288,7 @@ class SelfTest {
 
       // ---------------------------------------------------------- 歌词引擎
       {
-        id: 'lyrics', name: '歌词引擎', desc: 'LRC/yrc 解析、翻译合并、逐字定位',
+        id: 'lyrics', name: '歌词引擎', desc: 'LRC/yrc 解析、翻译合并、行级定位',
         checks: [
           { id: 'parseLrc', name: '标准 LRC 解析', run: () => {
             const r = parseLrc('[00:01.00]甲\n[00:02.50]乙');
@@ -1181,7 +1181,9 @@ class SelfTest {
             const buf = Buffer.from(await res.arrayBuffer());
             return { ok: res.status === 200 && buf.length > 500, detail: `HTTP ${res.status}，${buf.length} 字节` };
           } },
-          { id: 'lyric', name: '逐字歌词（yrc）', net: true, run: async () => {
+          // 验的是**数据层**：歌词接口能不能拿到 + yrc 逐字轨能不能解析出行。
+          // 别再写成"逐字歌词"这种功能名 —— 逐字染色渲染已下线，检查名字要如实。
+          { id: 'lyric', name: '歌词接口（含 yrc 逐字数据解析）', net: true, run: async () => {
             const r = await e.netease.search('孤勇者 陈奕迅', { limit: 1 });
             if (!r.ok || !r.songs.length) return { ok: false, detail: `前置搜索未成功：${r.msg || '无结果'}` };
             const ly = await e.netease.lyric(r.songs[0].id);

@@ -1,13 +1,16 @@
 /**
  * 端到端集成测试（不依赖 Electron，可直接在 CI 或纯命令行环境跑）
  * =======================================================
- * 验证核心交付物：一条弹幕点歌之后，歌词能不能以逐字精度到达叠加层。
+ * 验证核心交付物：一条弹幕点歌之后，歌词能不能**按句**正确到达叠加层
+ * （当前行定位、翻译合并、SSE 推送、代理流、演练模式、安全边界）。
  *
  * 关键约定（踩过坑，别改）：
  *   · _enqueue 在空闲时会**自动开播**，点歌之后不要再手动调 next()，
  *     否则会立刻切到下一首（空队列）把状态清掉。
- *   · 测逐字进度必须选「真正在唱的行」，且探针点要落在**逐字跨度内**；
- *     元信息行（作词/作曲）逐字跨度会跨到后面的行，preroll 一开就串行。
+ *   · 验歌词定位必须选「真正在唱的行」，且探针点要落在**本行区间内**；
+ *     元信息行（作词/作曲）的结束时间会跨到后面的行，preroll 一开就串行。
+ *   · 逐字（yrc）染色显示已下线（2026-09-26）—— 断言只到"行级定位"这一层，
+ *     别再去测"某个字染到哪了"。逐字时间戳本身仍照常解析（数据层保留）。
  */
 'use strict';
 
@@ -218,13 +221,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const atLineStart = LyricSync.locate(tl, probeLine.time, { preroll: 0 });
     ok('行首定位到探针行', atLineStart.current === probeLine);
     const atZero = LyricSync.locate(tl, probeLine.time + w0.t + 0.001, { preroll: 0 });
-    ok('首字起唱时逐字进度≈0', atZero.wordProgress < 0.15, atZero.wordProgress.toFixed(3));
+    ok('首字起唱时词级进度≈0', atZero.wordProgress < 0.15, atZero.wordProgress.toFixed(3));
 
     const atMid = LyricSync.locate(tl, probeLine.time + w0.t + span * 0.5, { preroll: 0 });
-    ok('中点逐字进度∈(0.15,0.85)', atMid.wordProgress > 0.15 && atMid.wordProgress < 0.85, atMid.wordProgress.toFixed(3));
+    ok('中点词级进度∈(0.15,0.85)', atMid.wordProgress > 0.15 && atMid.wordProgress < 0.85, atMid.wordProgress.toFixed(3));
 
     const atEnd = LyricSync.locate(tl, probeLine.time + w0.t + span * 0.999, { preroll: 0 });
-    ok('临近行末逐字进度≈1', atEnd.wordProgress > 0.85, atEnd.wordProgress.toFixed(3));
+    ok('临近行末词级进度≈1', atEnd.wordProgress > 0.85, atEnd.wordProgress.toFixed(3));
     ok('定位到的就是探针行', atMid.current === probeLine, String(atMid.current && atMid.current.text).slice(0, 20));
 
     const segs = LyricSync.segments(probeLine);
@@ -355,7 +358,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const s = engine.state();
     ok('演示模式启动', r.ok, `歌词 ${r.lines} 行，时长 ${r.duration}s`);
     ok('演示中 track 已是假曲目', s.nowPlaying && s.nowPlaying.name === 'NekoFM 演示曲目', s.nowPlaying && s.nowPlaying.name);
-    ok('演示曲目是逐字歌词', engine.lyricTimeline.lines.some((l) => l.karaoke === 'word'));
+    ok('演示曲目带词级时间戳（数据层，渲染用不到）', engine.lyricTimeline.lines.some((l) => l.karaoke === 'word'));
     ok('演示中进度在推进', s.playback.status === 'playing' && s.playback.position >= 0, 'pos=' + s.playback.position.toFixed(1));
     const st2 = engine.stopDemo();
     ok('演示可停止并还原现场', st2.ok && engine.track === before, engine.track ? String(engine.track.name) : '(无)');

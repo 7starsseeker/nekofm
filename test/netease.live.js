@@ -29,7 +29,7 @@ const { buildTimeline, locate } = require('../src/core/lyrics/lrc');
     console.log(`   逐字样例行: "${k.text}"  共${k.words.length}字`);
     console.log('   前 4 字:', k.words.slice(0, 4).map((w) => `${w.text}@${w.t.toFixed(3)}s(${w.d.toFixed(3)}s)`).join(' '));
   } else {
-    console.log('   （该曲无逐字，将按 karaoke=line/plain 渲染）');
+    console.log('   （该曲无逐字数据，词级进度不可算）');
   }
 
   console.log('\n== 4) 定位函数在各时间点的输出（模拟渲染层） ==');

@@ -43,7 +43,7 @@ src/
     queue.js             点歌队列（去重窗口 / 每人上限 / 冷却 / 权限 / force 回填）
     blacklist.js         黑名单（song / keyword / artist / bvid 四种粒度）
     commands.js          弹幕文本 → 指令对象（纯函数，词表来自 config.commands）
-    demo.js              演练模式素材（假曲目 + 假逐字歌词）
+    demo.js              演练模式素材（假曲目 + 假歌词时间轴）
     lyrics/lrc.js        LRC / 增强型 LRC / 网易云 yrc → 统一 timeline
     netease/
       client.js          网易云客户端（**限流熔断与退避在这里**）

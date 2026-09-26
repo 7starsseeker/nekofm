@@ -274,8 +274,10 @@ function locate(timeline, pos, opts = {}) {
  * 时间轴 → LRC 文本。用于把在线匹配到的歌词**存成旁车文件**，
  * 下次播放直接读本地，不再联网（顺带绕开网易云限流）。
  *
- * enhanced=true 输出**增强型 LRC**（行内 `<mm:ss.xx>` 逐字时间戳）——
- * 本程序的解析器认这个格式，逐字卡拉OK能完整保留；
+ * enhanced=true 输出**增强型 LRC**（行内 `<mm:ss.xx>` 逐字时间戳）。
+ * 注意：**目前没有调用方用 enhanced=true** —— 旁车歌词只写标准 LRC
+ * （`sources/local.js` 传的是 false）。逐字染色下线后没人再需要那份逐字版，
+ * 但解析能力留着（读旧 `.karaoke.lrc` 时仍要用），将来要恢复也现成；
  * enhanced=false 输出标准 LRC，兼容其它播放器。两种都会写，见 local.saveLyrics。
  *
  * 翻译不在这里输出：它单独走 `.trans.lrc`，与读取端的约定一致。

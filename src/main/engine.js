@@ -223,7 +223,7 @@ class Engine extends EventEmitter {
      * 「逐字卡拉OK」和「桌面歌词风」两个主题已下线（用户定：只留单行滚动 / 双语）。
      * 但存盘里可能还是旧值 —— 不纠正的话 `data-theme` 会挂着一个**没有任何
      * CSS 规则**的值（看着像样式坏了），而且下拉框也选不中、保存时会写成空值。
-     * 映射到最接近的一项：karaoke→scroll（纯原文，逐字由勾选框管）、
+     * 映射到最接近的一项：karaoke→scroll（纯原文 + 当前行高亮）、
      * desktop→dual（它本来就是带翻译的）。
      */
     const THEME_MIGRATE = { karaoke: 'scroll', desktop: 'dual' };

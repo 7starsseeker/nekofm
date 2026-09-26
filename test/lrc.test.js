@@ -98,7 +98,9 @@ t('定位与 0.35s 预滚', () => {
   assert.strictEqual(locate(tl, 4.8).index, 1, '预滚应提前切到下一行');
   assert.strictEqual(locate(tl, 100).index, 2);
 });
-t('逐字进度推进', () => {
+// 数据层指标：按词级时间戳算出的行内进度。逐字**渲染**已下线，
+// 但这个值仍由 lyric-sync 提供（将来恢复逐字染色就靠它），所以照常测。
+t('词级进度推进', () => {
   const tl = buildTimeline({ lrc: LRC, yrc: YRC });
   const a = locate(tl, 5.0);
   const b = locate(tl, 6.0);
