@@ -778,7 +778,7 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
       r2.ok === true && !!engine.track, `在播=${engine.track && engine.track.title} status=${engine.playback.status}`);
 
     // 交给命令层：togglePlay 必须回报**真实的**最终状态
-    const { createCommandHandler } = require('T:/nekofm/src/main/commands');
+    const { createCommandHandler } = require('../src/main/commands');
     const handle = createCommandHandler({ engine, saveConfig: () => {}, hooks: {} });
     resetQueue();
     engine.track = null;
@@ -902,7 +902,7 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
     ok('findQueueSong 对不存在的 key 返回 null', engine.findQueueSong('不存在:1') === null);
 
     // 走命令层：与界面完全同一条路径（savedAdd + key）
-    const { createCommandHandler } = require('T:/nekofm/src/main/commands');
+    const { createCommandHandler } = require('../src/main/commands');
     const handle = createCommandHandler({ engine, saveConfig: () => {}, hooks: {} });
 
     // 注意：命令处理器**直接返回**引擎结果（HTTP 层才包 result），所以看 r1.ok / r1.name
@@ -965,7 +965,7 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
     ok('下播后 streaming=false', engine.streaming === false);
 
     // 手动「加入已保存」才是唯一入口（走命令层，与界面同一条路径）
-    const { createCommandHandler } = require('T:/nekofm/src/main/commands');
+    const { createCommandHandler } = require('../src/main/commands');
     const handle = createCommandHandler({ engine, saveConfig: () => {}, hooks: {} });
     const r = await handle({ action: 'savedAdd', song: mkSong(3), uname: '观众1' });
     ok('手动「加入已保存」正常生效', r.ok === true && r.name === names[3], r.ok ? `已加入 ${r.name}` : r.msg);
@@ -1057,7 +1057,7 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
   console.log('\n== 6k) 按网易云歌曲 ID 点播（点歌 ID 1234567） ==');
   {
     resetQueue();
-    const { parseCommand } = require('T:/nekofm/src/core/commands');
+    const { parseCommand } = require('../src/core/commands');
     const pc = parseCommand('点歌 ID 999888777');
     ok('弹幕解析：`点歌 ID 999888777` → order + keyword「ID 999888777」',
       pc.cmd === 'order' && pc.args.keyword === 'ID 999888777',

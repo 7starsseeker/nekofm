@@ -40,10 +40,13 @@ const FORBIDDEN_PATHS = [
 /** 遍历时永远不进（--all 模式用） */
 const SKIP_DIRS = new Set(['node_modules', 'data', 'release', '.git', '.zcode', '.playwright-mcp', 'dist']);
 
+/** 代码类扩展名（用于只对代码生效的规则） */
+const CODE_EXT = new Set(['.js', '.cjs', '.mjs', '.html', '.css', '.bat', '.cmd', '.ps1', '.sh', '.yml', '.yaml']);
+
 /**
  * 内容层规则。**都刻意做得很"紧"** —— 宁可漏一点点，也不要因为误报
  * 让维护者养成"这条检查本来就爱红"的习惯，那等于没检查。
- * 每条：{ 名, 正则, 说明 }
+ * 每条：{ 名, 正则, 说明, only? }（`only` = 只对这些扩展名生效）
  */
 const CONTENT_RULES = [
   { name: '网易云登录态', re: /MUSIC_U=[A-Za-z0-9%._-]{16,}/, note: '出现了真实的网易云 cookie 值' },
@@ -56,6 +59,27 @@ const CONTENT_RULES = [
   { name: '接口 Key', re: /sk-[A-Za-z0-9_-]{24,}/, note: '出现形如 sk- 的接口密钥' },
   { name: '私钥', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, note: '出现 PEM 私钥' },
   { name: 'AWS 凭据', re: /AKIA[0-9A-Z]{16}/, note: '出现 AWS Access Key ID' },
+
+  /**
+   * 本机绝对路径 —— 这类问题有两个后果，都很痛：
+   *   1. **改到自己机器之外的任何环境就崩**。真实踩过：某个测试文件里把模块
+   *      `require` 写成了带盘符的绝对路径，本机跑当然没问题，
+   *      CI 上直接 `Cannot find module '<盘符>/…/src/main/commands'`。
+   *   2. 它同时**把作者的本机目录结构暴露出去**。
+   * 所以钉成检查：`require` 不许用绝对路径，源码里也不许写死本项目的绝对路径。
+   * （这条注释本身刻意不写出那个路径 —— 否则它会命中自己的规则。）
+   */
+  { name: 'require 用了绝对路径',
+    re: /require\(\s*['"](?:[A-Za-z]:[\\/]|\/(?!\/))/,
+    note: 'require 的路径是本机绝对路径，换环境必崩。改成相对路径' },
+  // 只查代码：文档里拿盘符路径当命令示例是合理的（那是给读者看的占位），
+  // 源码里写死盘符路径才是问题（不可移植 + 暴露作者目录结构）。
+  //
+  // 约定：**示例统一用 `D:` 开头**（中性盘符）。其它盘符（C/T/G/Q…）一律视为
+  // 作者本机路径 —— 这样规则既有信号又不会因为文档示例天天误报。
+  { name: '写死了本项目的绝对路径', only: CODE_EXT,
+    re: /(?<![A-Za-z0-9])(?![Dd]:)[A-Za-z]:[\\/][^\s'"`)]*nekofm/i,
+    note: '源码里出现了带盘符的项目绝对路径（示例请统一用 D: 开头）。用相对路径或「<程序目录>」占位' },
 ];
 
 /** 只扫文本、且体积有上限（避免读二进制与超大文件） */
@@ -136,7 +160,9 @@ for (const f of files) {
   let text;
   try { text = fs.readFileSync(abs, 'utf8'); } catch { continue; }
   scanned++;
+  const ext = path.extname(f).toLowerCase();
   for (const r of CONTENT_RULES) {
+    if (r.only && !r.only.has(ext)) continue;
     const m = text.match(r.re);
     if (!m) continue;
     // 报出行号，方便定位；**不回显命中内容本身**（免得把凭据打印到 CI 日志里）
