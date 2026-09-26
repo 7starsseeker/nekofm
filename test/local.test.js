@@ -35,6 +35,7 @@ const { Engine } = require('../src/main/engine');
 const { AppServer } = require('../src/main/server');
 const { createCommandHandler } = require('../src/main/commands');
 const { DEFAULT_CONFIG } = require('../src/core/config');
+const { probeFfmpeg, skipAllBecause } = require('./_helpers');
 
 const PORT = 37902;
 const DIR = path.join(os.tmpdir(), 'nekofm-localtest');
@@ -59,6 +60,9 @@ function makeAudio(file, { seconds = 8, meta = {} } = {}) {
 }
 
 (async () => {
+  // 素材是现场用 ffmpeg 造的，没有 ffmpeg 就整份跳过（环境不具备 ≠ 失败）
+  if (!probeFfmpeg().ok) skipAllBecause('本地音乐链路测试', '未找到 ffmpeg / ffprobe（素材需要现场生成）');
+
   // ---------------------------------------------------------- 准备素材
   fs.rmSync(DIR, { recursive: true, force: true });
   fs.mkdirSync(path.join(DIR, 'sub'), { recursive: true });

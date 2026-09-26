@@ -75,10 +75,26 @@ jobs:
         with:
           node-version: '22'
 
-      # 本地曲库测试要用 ffmpeg 现场生成音频素材；Ubuntu 运行器自带，Windows 需要装
+      # 本地曲库相关的测试要用 ffmpeg **现场生成音频素材**（这样不依赖任何现成的
+      # 二进制素材）。GitHub 的运行器镜像里**没有预装 ffmpeg**，两个平台都要自己装。
+      - name: 安装 FFmpeg（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: 安装 FFmpeg（Windows）
         if: runner.os == 'Windows'
-        run: choco install ffmpeg -y --no-progress
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          # choco 装完只更新机器级 PATH，当前 job 的后续步骤读不到 —— 显式加一遍
+          "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: 确认 ffmpeg / ffprobe 真的可用
+        run: |
+          ffmpeg -version
+          ffprobe -version
 
       - name: 单元测试
         run: npm test

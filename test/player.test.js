@@ -35,6 +35,7 @@ const { AppServer } = require('../src/main/server');
 const { createCommandHandler } = require('../src/main/commands');
 const { DEFAULT_CONFIG, deepMerge } = require('../src/core/config');
 const { MediaCache } = require('../src/main/cache');
+const { probeFfmpeg, skipAllBecause } = require('./_helpers');
 
 const PORT = 37905;
 let pass = 0, fail = 0, skipped = 0;
@@ -54,6 +55,9 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
 }
 
 (async () => {
+  // 素材是现场用 ffmpeg 造的，没有 ffmpeg 就整份跳过（环境不具备 ≠ 失败）
+  if (!probeFfmpeg().ok) skipAllBecause('播放器功能测试', '未找到 ffmpeg / ffprobe（素材需要现场生成）');
+
   // ---------------------------------------------------------------- 准备素材
   fs.rmSync(ROOT, { recursive: true, force: true });
   const musicDir = path.join(ROOT, 'music');

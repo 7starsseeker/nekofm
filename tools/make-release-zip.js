@@ -29,11 +29,14 @@ const zlib = require('node:zlib');
 const ROOT = path.resolve(__dirname, '..');
 const argv = process.argv.slice(2);
 const STORE_ONLY = argv.includes('--store');
+/** 包内统一套一层同名目录 —— 否则解压会把 70 多个文件直接铺在用户的下载目录里 */
+const NO_PREFIX = argv.includes('--no-prefix');
 const positional = argv.filter((a) => !a.startsWith('--'));
 
 const SRC = path.resolve(positional[0] || path.join(ROOT, 'release', 'win-unpacked'));
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const OUT = path.resolve(positional[1] || path.join(ROOT, 'release', `NekoFM-${pkg.version}-win-x64.zip`));
+const PREFIX = NO_PREFIX ? '' : path.basename(OUT).replace(/\.zip$/i, '') + '/';
 
 /** 绝不进包的名字 —— 兜底拦截，正常路径下这些本来就在 data/ 里被跳过 */
 const FORBIDDEN = new Set([
@@ -99,7 +102,7 @@ function collect(dir, rel = '') {
     if (lst.isDirectory()) { out.push(...collect(abs, r)); continue; }
     if (!lst.isFile()) continue;
     if (/\.(log|tmp)$/i.test(e.name)) { line(`  [跳过文件] ${r}`); continue; }
-    out.push({ rel: r, abs, size: lst.size });
+    out.push({ rel: PREFIX + r, abs, size: lst.size });
   }
   return out;
 }
@@ -206,9 +209,11 @@ const files = collect(SRC);
 if (!files.length) { console.error('[zip] 源目录里没有可打包的文件'); process.exit(1); }
 
 // 入库自检：包内**不允许**出现任何运行时数据特征
+// （包内有统一前缀，所以判顶层目录前先把前缀剥掉）
 const bad = files.filter((f) => {
-  const base = path.basename(f.rel).toLowerCase();
-  const top = f.rel.split('/')[0].toLowerCase();
+  const inner = PREFIX && f.rel.startsWith(PREFIX) ? f.rel.slice(PREFIX.length) : f.rel;
+  const base = path.basename(inner).toLowerCase();
+  const top = inner.split('/')[0].toLowerCase();
   return FORBIDDEN.has(base) || FORBIDDEN_DIRS.has(top);
 });
 if (bad.length) {
