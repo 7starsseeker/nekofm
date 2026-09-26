@@ -49,7 +49,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * 把浏览器窗口从**任务栏**抠掉用的小脚本（PowerShell + P/Invoke）。
  * 里面两个占位符由 `_hideFromTaskbar` 注入：进程号、profile 目录（兜底匹配用）。
  * ⚠️ 注入必须用 `replaceAll` —— 占位符在脚本里出现两次时，`replace` 只换第一处
- * （人家第一版就踩了：注释里也写了一遍占位符，结果真脚本里的没被替换，
+ * （踩过一次：注释里也写了一遍占位符，结果真脚本里的没被替换，
  * PowerShell 直接解析报错，表现成"隐藏功能静默失效"）。
  *
  * 为什么这么绕：
@@ -82,11 +82,11 @@ public class NekoTaskbar {
    *   · Chrome_WidgetWin_0 是隐藏辅助窗（0x0、IsWindowVisible=false）—— 不用碰；
    *   · Chrome_WidgetWin_1 是界面窗口，而且**可能不止一个**（实测 Edge 会多开一个
    *     小窗，位置就在 0,0）。只改第一个有可能改到"没有任务栏按钮的那个"，
-   *     日志写着成功、图标照旧占着一格（人家第一版就这么错的）。
+   *     日志写着成功、图标照旧占着一格（第一版就是这么错的）。
    * 全都改上最稳：工具窗口只是不进任务栏 / Alt+Tab，其余行为不变。
    *
    * ⚠️ 这段在 JS 模板字符串里，注释**不能出现反引号** —— 会提前截断模板字符串
-   * （人家刚踩过：整个文件直接语法错误）。
+   * （踩过一次：整个文件直接语法错误）。
    */
   public static int StyleAll(uint target) {
     int n = 0;
@@ -162,7 +162,7 @@ class BrowserDanmakuChannel {
     this.exe = BROWSER_CANDIDATES.find((p) => { try { return fs.existsSync(p); } catch { return false; } }) || null;
     /**
      * 独立 user-data-dir：绝不碰用户日常浏览器的 profile
-     * （否则会跟用户正在开的窗口抢锁，也可能动到人家的登录态）。
+     * （否则会跟用户正在开的窗口抢锁，也可能动到用户自己的登录态）。
      */
     this.userDataDir = opts.userDataDir || path.join(os.tmpdir(), 'nekofm-bili-channel');
     this.proc = null;
