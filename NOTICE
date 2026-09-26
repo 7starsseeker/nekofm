@@ -1,0 +1,35 @@
+NekoFM
+Copyright 2026 NekoFM contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+--------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------
+
+The Windows build published in the Releases section bundles the following
+components. They are not part of the NekoFM source code and remain under
+their own licenses.
+
+  Electron
+    License: MIT
+    https://github.com/electron/electron
+    The "LICENSE.electron.txt" and "LICENSES.chromium.html" files shipped
+    alongside the executable in the release archive contain the full texts.
+
+  Chromium / ffmpeg (as embedded in Electron)
+    Chromium is licensed under the BSD 3-Clause License; the ffmpeg build
+    embedded in Electron is licensed under LGPL/GPL depending on the build.
+    Full texts: see "LICENSES.chromium.html" in the release archive.
+
+The source repository itself declares no runtime third-party dependency:
+NekoFM runs on Node.js built-ins plus Electron.
+
+--------------------------------------------------------------------------
+Content and accounts
+--------------------------------------------------------------------------
+
+NekoFM ships no audio, no lyrics, no cookies and no API credentials.
+Every user connects with their own accounts and is responsible for
+complying with the terms of service of the platforms they use and with
+the copyright rules that apply to the content they play.

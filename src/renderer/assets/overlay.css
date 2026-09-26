@@ -1,0 +1,454 @@
+/* ==========================================================================
+   NekoFM 歌词叠加层样式
+   要点：
+     1) 背景必须完全透明 —— 直播姬浏览器源会把它直接叠在画面上
+     2) 文字描边用多重 text-shadow + -webkit-text-stroke，
+        单靠 text-stroke 在浅色画面上会糊
+     3) 所有尺寸以 CSS 变量驱动，方便控制台实时改字号/颜色
+   ========================================================================== */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+  overflow: hidden;
+  /*
+    叠加层永远不该挡住直播画面的操作，所以默认全局禁用鼠标事件。
+    **但预览窗里的按钮必须单独恢复 pointer-events: auto** ——
+    否则点击会直接穿透过去，表现就是"点了没反应"
+    （用户反馈的『关闭预览』按钮无效就是这个原因）。
+  */
+  pointer-events: none;
+  user-select: none;
+}
+
+.overlay-root {
+  --font-size: 42px;
+  /**
+   * 字体栈：优先**粗无衬线**（微软雅黑 UI / 思源黑体 / 苹方），末尾兜底系统无衬线。
+   * 用户要求中文字幕字体用更粗的无衬线字体，加粗—— 配合下面的 font-weight: 800，
+   * 中文笔画会明显更厚实，在直播画面里更立得住。
+   */
+  /**
+   * 字体栈：**末尾必须是 **。
+   * 原来末尾写的是  —— 而中文环境下  可能解析成**宋体**，
+   * 于是它把后面的无衬线兜底整个挡住，用户看到的还是衬线字体
+   * （中文字幕字体依然不是无衬线字体）。
+   * 这里去掉 system-ui，并把中文名微软雅黑也列上（Chromium 认中文名）。
+   */
+  --font-family: "Microsoft YaHei", "微软雅黑", SimHei, "黑体", "Microsoft YaHei UI", "Noto Sans SC", "Source Han Sans SC", "Source Han Sans CN", "PingFang SC", "Hiragino Sans GB", "WenQuanYi Micro Hei", Arial, "Helvetica Neue", sans-serif;
+  --color: #ffffff;
+  --active-color: #ffffff;
+  --stroke-color: #000000;
+  /* 描边宽度：**em 单位**，相对每个元素自己的字号（原文行/译文行字号不同，比例才能真正一致） */
+  --stroke-width: 0.06em;
+  /* 底板不透明度（深色字幕条）与高亮色：见 config.overlay.backdrop / activeColor */
+  --backdrop-alpha: 0.8;
+  /** 底板颜色（RGB 分量，逗号分隔）：深色字要配**浅底**，否则深字融进深底看不见 */
+  --backdrop-color: 255, 255, 255;
+  --opacity: 1;
+  --align: center;
+  --dim: 0.45;
+  --gap: 0.35em;
+
+  font-family: var(--font-family);
+  opacity: var(--opacity);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: stretch;
+  /**
+   * 横向 padding 从 24px 加宽到 **48px**：给高亮行的放大留出余量
+   * （`.line.active` 有 `scale()`，而 `.stage` 是 `overflow: hidden` ——
+   *  横向空间不够时，大字那行的两端就会被裁掉。2026-09-26 用户反馈）。
+   */
+  padding: 12px 48px 16px;
+}
+
+/* ------------------------------------------------------------------ 歌词区 */
+.stage {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  flex: 1 1 auto;
+  min-height: 0;
+  /* 信息栏在顶部时，给它让出高度，避免歌词压在信息栏上（用户反馈过重合） */
+  margin-top: var(--lyric-reserve, 0px);
+  /* 绝不溢出：宁可少显示几行，也不要出现"英文只露出下半边"这种裁切 */
+  overflow: hidden;
+}
+
+/* 预览窗顶部的工具条会占掉一块，正文要相应下移 */
+body.preview-mode .overlay-root { padding-top: 34px; }
+
+.lines {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: var(--align);
+  justify-content: flex-end;
+  gap: var(--gap);
+  text-align: var(--align);
+  /* 换行做滑动过渡（transform 由 overlay.js 设置），避免"啪"地跳变 */
+  will-change: transform;
+}
+
+.line {
+  font-size: var(--font-size);
+  color: var(--color);
+  line-height: 1.28;
+  font-weight: 800;   /* 加粗（用户要求加粗） */
+  letter-spacing: 0.02em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: var(--dim);
+  transform-origin: var(--align) center;
+  /* 高亮变化更柔：原来 .18s 的线性过渡看起来偏"生硬" */
+  transition: opacity .34s cubic-bezier(.22,.61,.36,1),
+              transform .34s cubic-bezier(.22,.61,.36,1),
+              color .34s cubic-bezier(.22,.61,.36,1);
+  /* 描边 + 投影（提升在亮/杂乱画面上的可读性） */
+  -webkit-text-stroke: var(--stroke-width) var(--stroke-color);
+  paint-order: stroke fill;
+  /**
+   * 阴影**只留下方投影**。
+   *
+   * 原来还有一层 `0 0 2px rgba(0,0,0,.85)`（四周微光）—— 它让字边缘发虚，
+   * 跟粗描边叠一起就是"糊成一团"的帮凶。2026-09-26 去掉。
+   *
+   * 2026-09-26 又**加强**了这层投影（用户实拍直播画面反馈"识别度太低"）：
+   * 原来 `0 2px 6px rgba(0,0,0,.55)` 在游戏那种杂乱背景上托不住字，
+   * 现在加深加宽（两层：一层大范围压暗背景、一层近距勾边）。
+   */
+  text-shadow:
+    0 2px 10px rgba(0,0,0,.9),
+    0 1px 3px rgba(0,0,0,.8);
+}
+
+/* 逐字/逐行染色样式已删除（2026-09-26：逐字功能下线，只保留当前行高亮） */
+
+.line.active {
+  color: var(--active-color);
+  opacity: 1;
+  /**
+   * **不做放大**（2026-09-26 用户第二次反馈"长行两边依然截断"后撤掉）。
+   *
+   * 这个 `scale()` 一路从 1.06 收到 1.03，但**只要大于 1，长行就必然有溢出风险**：
+   * 文字占满容器宽度时，放大 3% 就是单边多出约 1.5%（1920 宽下约 27px），
+   * 而 `.stage` 是 `overflow: hidden` —— 容器横向余量一旦不够（padding 被吃、
+   * 或源在直播姬里被裁），两端就被切。
+   * 当前行靠**颜色 + 发光 + 字重**已经足够突出，不值得为这点放大冒截断的险。
+   */
+  transform: none;
+  /**
+   * 当前行发光。范围与强度都**收敛**过（用户反馈"辉光效果范围太大"）：
+   * 最初 6px/.22 太弱、我一度加到 10px/.45 又太抢眼，现在取 6px/.3 ——
+   * 够把当前行"点亮"，又不会在画面上糊出一团光。
+   */
+  filter: drop-shadow(0 0 6px rgba(126, 231, 255, .3));
+}
+
+.line.near { opacity: 0.62; }
+
+/* ------------------------------------------------- 逐字/逐行染色：已下线 */
+/*
+ * 2026-09-26 用户决定不要逐字功能，连同这里的两套实现一起删了：
+ *   · `.line.karaoke`     —— 每个字两层文本 + clip-path 按进度揭开
+ *   · `.line.karaoke-line` —— 整行渐变（yrc 文本对不齐时的降级）
+ * 现在「当前行」只靠上面的 `.line.active`（强调色 + 轻微放大 + 投影）区分，
+ * 每帧零 DOM 操作、也没有 clip-path 重绘 —— 更省，观感也更干净。
+ * 歌词数据里的逐字时间戳（yrc / 增强 LRC）仍然照常解析，
+ * 只是不再用于渲染；将来要恢复，落点在这里 + overlay.js 的 buildWindow。
+ */
+
+/* ------------------------------------------------------------------ 翻译行 */
+.line .trans {
+  display: block;
+  /* 字号与原文**一致**（2026-09-26 用户要求；原来是 0.62em，双语时译文明显小一截） */
+  font-size: 1em;
+  /* 字重与原文一致（原为 500，用户反馈"没加粗"——译文看着比原文细一截） */
+  font-weight: 800;
+  opacity: 0.86;
+  margin-top: 0.12em;
+  letter-spacing: 0;
+  /**
+   * **必须重新声明描边**。`-webkit-text-stroke` 里的 em 是在**声明处**解析的，
+   * 子元素继承到的是"按父元素字号算好的 px 值" —— 不重新声明，译文这种小字就会
+   * 顶着一个按大字号算出来的粗描边，占比反而更大、笔画被填死
+   * （用户反馈"英文大字体看着还行，中文小字体还是黑乎乎的"，实测译文行 9.7% vs 原文行 6%）。
+   */
+  -webkit-text-stroke: var(--stroke-width) var(--stroke-color);
+}
+
+.line .roma {
+  display: block;
+  font-size: 0.5em;
+  font-weight: 400;
+  opacity: 0.7;
+  margin-top: 0.06em;
+  /* 同上：按自己的字号重算描边 */
+  -webkit-text-stroke: var(--stroke-width) var(--stroke-color);
+}
+
+/* --------------------------------------------------------------- 播放器信息栏 */
+/* 独立模块：封面 + 歌名 + 歌手 + 点歌者 + 进度条 + 下一首。
+   位置由 pos-* 类决定，主题由 theme-* 决定，各字段可单独开关。 */
+.info-bar {
+  --ib-accent: #7ee7ff;
+  --ib-cover: 64px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* max-width 从 78% 放宽到 96%（2026-09-26）：78% 时卡片最宽只有源宽的四分之三，
+     长歌名 / "歌手 · 点歌人" 那两行都是 nowrap+ellipsis，于是右侧被截得很明显 */
+  max-width: 96%;
+  padding: 10px 16px 10px 10px;
+  border-radius: 14px;
+  background: rgba(12, 16, 24, .58);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  font-family: var(--font-family);
+  font-size: 16px;
+  line-height: 1.45;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .35);
+  transition: opacity .25s ease, transform .25s ease;
+}
+.info-bar[hidden] { display: none; }
+
+/* 主题：无底卡（只留文字与描边），适合画面已经很花的时候 */
+.info-bar.theme-minimal {
+  background: transparent;
+  backdrop-filter: none;
+  box-shadow: none;
+  padding: 4px 8px;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, .85);
+}
+
+/* 位置（相对叠加层容器，四角/上下居中） */
+.info-bar.pos-top-left { position: absolute; top: 14px; left: 18px; }
+.info-bar.pos-top-right { position: absolute; top: 14px; right: 18px; }
+.info-bar.pos-top-center { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); }
+.info-bar.pos-bottom-left { position: absolute; bottom: 14px; left: 18px; }
+.info-bar.pos-bottom-right { position: absolute; bottom: 14px; right: 18px; }
+.info-bar.pos-bottom-center { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); }
+
+/* 封面 */
+.ib-cover {
+  position: relative;
+  width: var(--ib-cover);
+  height: var(--ib-cover);
+  flex: 0 0 auto;
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, .1);
+  display: grid;
+  place-items: center;
+}
+.ib-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ib-cover img[hidden] { display: none; }
+.ib-cover-fallback { font-size: calc(var(--ib-cover) * .5); color: rgba(255,255,255,.35); }
+.ib-cover-fallback[hidden] { display: none; }
+
+/* 文本区 */
+.ib-meta { min-width: 0; flex: 1 1 auto; }
+.ib-line1 { display: flex; align-items: center; gap: 8px; }
+.ib-name {
+  font-weight: 700;
+  font-size: 1.12em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ib-badge {
+  flex: 0 0 auto;
+  font-size: .72em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--ib-accent);
+  color: #06121a;
+  font-weight: 700;
+}
+.ib-quality { background: rgba(255,255,255,.22); color: #fff; font-weight: 500; }
+.ib-line2 {
+  display: flex; align-items: center; gap: 6px;
+  font-size: .82em; opacity: .88;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ib-sep { opacity: .5; }
+.ib-requester { color: var(--ib-accent); }
+.ib-bili { opacity: .85; }
+
+/* 进度条 */
+.ib-progress { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.ib-bar {
+  flex: 1 1 auto; height: 4px; border-radius: 2px;
+  background: rgba(255,255,255,.22); overflow: hidden;
+}
+.ib-bar > i {
+  display: block; height: 100%; width: 0%;
+  background: var(--ib-accent);
+  transition: width .18s linear;
+}
+.ib-time {
+  flex: 0 0 auto; font-size: .74em; opacity: .8;
+  font-variant-numeric: tabular-nums;
+  display: flex; gap: 6px;
+}
+
+/* 下一首 */
+.ib-upnext {
+  margin-top: 4px;
+  font-size: .76em;
+  opacity: .72;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ib-upnext[hidden] { display: none; }
+
+
+/* （旧的 .track-card 样式已移除：信息栏统一由上面的 .info-bar 承担） */
+
+
+/* --------------------------------------------------------------- 占位/提示 */
+.idle {
+  align-self: center;
+  color: rgba(255,255,255,.5);
+  font-size: calc(var(--font-size) * 0.6);
+  text-shadow: 0 2px 6px rgba(0,0,0,.6);
+}
+
+.notice {
+  position: absolute;
+  left: 50%;
+  bottom: 4px;
+  transform: translateX(-50%);
+  max-width: 86%;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: calc(var(--font-size) * 0.36);
+  background: rgba(10, 14, 22, .72);
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity .3s ease;
+}
+.notice[hidden] { display: none; }
+.notice.warn { background: rgba(120, 78, 0, .82); }
+.notice.error { background: rgba(120, 24, 32, .85); }
+.notice.info { background: rgba(16, 60, 74, .82); }
+
+/* ------------------------------------------------------------ 主题微调 */
+/* 桌面歌词：大字、只留 1~2 行、顶部信息卡 */
+/* desktop / karaoke 主题已下线（2026-09-26）：前者只在直播画面里有区别、
+   控制台歌词条里跟别的长得一样，留着只会让人以为是坏的；后者用户不需要。
+   现在只剩 scroll（单行滚动）与 dual（双语）两个主题。 */
+
+/* 双行：行距放松，翻译更醒目 */
+.stage[data-theme="dual"] .lines { gap: 0.55em; }
+.stage[data-theme="dual"] .line { font-size: calc(var(--font-size) * 0.92); }
+
+/* 逐行滚动：非当前行更暗，突出当前行 */
+.stage[data-theme="scroll"] .line { opacity: .38; }
+.stage[data-theme="scroll"] .line.near { opacity: .6; }
+.stage[data-theme="scroll"] .line.active { opacity: 1; }
+
+/* ------------------------------------------------------------ 预览窗工具条 */
+/*
+  只在 ?preview=1 时出现（Electron 预览窗）。直播姬的浏览器源不带该参数，
+  所以正式画面里永远看不到它。
+*/
+.preview-bar {
+  /*
+    **恢复可点击**：body 上是 pointer-events: none（叠加层不该挡住画面），
+    工具条与按钮必须显式打开，否则点击穿透 —— "点了没反应"就是这么来的。
+  */
+  pointer-events: auto;
+  position: fixed; left: 0; right: 0; top: 0; z-index: 9999;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px; font-size: 12px; line-height: 1.6;
+  background: rgba(10, 14, 20, .82); color: #9fb3c8;
+  border-bottom: 1px solid rgba(120, 160, 200, .25);
+  /*
+    整条**不是**拖动区，只有下面那行文字是。
+    之前把 -webkit-app-region: drag 挂在整条上，按钮虽然写了 no-drag，
+    点击仍可能被拖动区吞掉 —— 用户反馈"点『关闭预览』没反应，只能用菜单关"
+    就是这一类问题。把拖动范围缩到最小最稳妥。
+  */
+  -webkit-app-region: no-drag;
+}
+.preview-bar[hidden] { display: none; }
+.preview-bar .pb-drag { flex: 1; user-select: none; -webkit-app-region: drag; }
+.preview-bar button {
+  -webkit-app-region: no-drag;
+  font: inherit; font-size: 12px; padding: 2px 10px; cursor: pointer;
+  color: #cfe8f5; background: #14586b; border: 1px solid #1d7b93; border-radius: 4px;
+}
+.preview-bar button:hover { background: #1a7089; }
+.preview-bar .pb-close { background: #7a2230; border-color: #a33244; }
+.preview-bar .pb-close:hover { background: #9c2b3d; }
+/* 预览时给个底色，否则透明窗口里看不清边界 */
+body.preview-mode { background: rgba(0, 0, 0, .35); }
+
+/* ------------------------------------------------------------ 分区显示 */
+/*
+  直播姬里可以放两个浏览器源：
+    /overlay?only=lyrics  只显示歌词
+    /overlay?only=info    只显示播放信息卡片
+  这样两边各自摆位置，不会互相压住（用户提的需求）。
+*/
+html.only-lyrics #infoBar { display: none !important; }
+html.only-info #stage,
+html.only-info #idle,
+html.only-info #notice { display: none !important; }
+/* 只显示信息卡时，不需要给歌词留位 */
+html.only-info .stage { margin-top: 0 !important; }
+html.only-info .overlay-root { justify-content: flex-start; padding-top: 12px; }
+
+/* --------------------------------------------------- 信息卡片长文本：循环滚动 */
+/**
+ * 用户要求："信息卡的显示是否可以做到左右循环滚动？目前一页显示不全的内容很多"。
+ *
+ * 规则（滚动逻辑在 overlay.js 的 applyRolling）：
+ *   · **只在真正溢出时才滚** —— 短歌名静止，画面不会无谓地动；
+ *   · **无缝循环**：`.mq-run` 是 `inline-block`（宽度 = 内容），末尾追加一份
+ *     `.mq-dup` 副本，动画滚 `-50%`（正好"内容 + 间隔"），首尾衔接看不出接缝；
+ *   · `text-overflow: clip` —— 滚动时不该再出现省略号。
+ */
+.ib-name .mq-run,
+.ib-line2 .mq-run {
+  display: inline-block;
+  white-space: nowrap;
+  will-change: transform;
+}
+.ib-name .mq-dup,
+.ib-line2 .mq-dup { padding-left: 3em; }
+.ib-name.rolling .mq-run,
+.ib-line2.rolling .mq-run {
+  animation: nekofm-marquee var(--mq-dur, 12s) linear infinite;
+}
+.ib-name.rolling,
+.ib-line2.rolling { text-overflow: clip; }
+@keyframes nekofm-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+/* ------------------------------------------------------------------ 歌词底板（可选） */
+/**
+ * 给字幕垫一条半透明深色带。
+ *
+ * 为什么需要（2026-09-26 用户实拍反馈"字幕颜色和画面对比度太低不明显"）：
+ * 那次背景是青蓝色调的亮画面，而高亮色 `#7ee7ff` 本身就是浅青 —— **同色系**，
+ * 文字直接融进背景。这类问题靠描边解决不了（描边太粗中文笔画会糊），
+ * 靠改色也只是换一种背景翻车；**底板是唯一在任意画面上都稳的办法**。
+ *
+ * 默认关闭（叠加层的美感在于不挡画面），控制台里 0~80% 可调。
+ * 底板跟着 `.lines` 走 —— 它是整宽容器，所以看起来就是一条字幕带。
+ */
+.overlay-root[data-backdrop="on"] .lines {
+  background: rgba(var(--backdrop-color, 0, 0, 0), var(--backdrop-alpha, .45));
+  border-radius: .35em;
+  padding: .12em .5em;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, .35);
+}

@@ -1,0 +1,14 @@
+# 默认：让 git 自己判断文本/二进制，文本统一以 LF 存入仓库
+* text=auto
+
+# 批处理必须是 CRLF —— cmd.exe 对 LF 结尾的 .bat 处理不稳（见 README「踩过的坑」）
+*.bat text eol=crlf
+
+# 二进制资源别做换行转换
+*.png binary
+*.ico binary
+*.jpg binary
+*.webp binary
+
+# 语言统计：把文档资源排除掉，免得占用 GitHub 的百分比
+docs/screenshots/* linguist-documentation

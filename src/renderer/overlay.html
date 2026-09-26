@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>NekoFM 歌词叠加层</title>
+<!-- CSP（响应头 + 本页 <head> 里的 meta）由 src/main/server.js 按 CSP_POLICY 统一注入，
+     这里不要手写：写进 <title> 会因 RCDATA 规则整段变成纯文本、CSP 完全不生效（实测踩到）。 -->
+<link rel="stylesheet" href="/assets/overlay.css" />
+</head>
+<body class="overlay-root">
+  <!--
+    播放器信息栏（独立模块）：封面 + 歌名 + 歌手 + 点歌者 + 进度条 + 下一首
+    位置/主题/各项开关都在控制台里配，或走 config.overlay.infoBar
+  -->
+  <div id="infoBar" class="info-bar pos-top-left theme-card" hidden>
+    <div class="ib-cover" id="ibCoverWrap">
+      <img id="ibCover" alt="" />
+      <div class="ib-cover-fallback" id="ibCoverFallback">♪</div>
+    </div>
+    <div class="ib-meta">
+      <div class="ib-line1">
+        <span class="ib-name" id="ibName">—</span>
+        <span class="ib-badge" id="ibSource" hidden></span>
+        <span class="ib-badge ib-quality" id="ibQuality" hidden></span>
+      </div>
+      <div class="ib-line2">
+        <span id="ibArtist">—</span>
+        <span class="ib-sep" id="ibSep1" hidden>·</span>
+        <span class="ib-requester" id="ibRequester" hidden></span>
+        <span class="ib-sep" id="ibSep2" hidden>·</span>
+        <span class="ib-bili" id="ibBili" hidden></span>
+      </div>
+      <div class="ib-progress" id="ibProgressWrap">
+        <div class="ib-bar"><i id="ibBar"></i></div>
+        <div class="ib-time"><span id="ibPos">0:00</span><span id="ibDur">0:00</span></div>
+      </div>
+      <div class="ib-upnext" id="ibUpNext" hidden></div>
+    </div>
+  </div>
+
+  <!-- 歌词主体 -->
+  <div id="stage" class="stage" data-theme="scroll">
+    <div id="lines" class="lines"></div>
+  </div>
+
+  <!-- 无歌曲时的占位（可通过 ?idle=0 隐藏） -->
+  <div id="idle" class="idle">等待播放…</div>
+
+  <!-- 角标提示（点歌回执/错误），可通过 ?notices=0 关闭 -->
+  <div id="notice" class="notice" hidden></div>
+
+  <!--
+    预览窗专用工具条（只有 ?preview=1 时才显示）。
+    叠加层预览窗是无边框窗口，没有系统标题栏和关闭按钮 ——
+    不给入口的话用户根本关不掉它。
+    直播姬的浏览器源不会带 preview 参数，所以这条工具条
+    永远不会出现在正式画面里。
+  -->
+  <div id="previewBar" class="preview-bar" hidden>
+    <span class="pb-drag" id="pbDrag">叠加层预览 · 拖动此条可移动窗口</span>
+    <button id="pbReload" type="button">重新加载</button>
+    <button id="pbClose" type="button" class="pb-close">关闭预览</button>
+  </div>
+
+  <script src="/shared/lyric-sync.js"></script>
+  <script src="/assets/overlay.js"></script>
+</body>
+</html>

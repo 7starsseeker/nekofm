@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>NekoFM 控制台</title>
+<!-- CSP（响应头 + 本页 <head> 里的 meta）由 src/main/server.js 按 CSP_POLICY 统一注入，
+     这里不要手写：写进 <title> 会因 RCDATA 规则整段变成纯文本、CSP 完全不生效（实测踩到）。 -->
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f1319; --panel: #151b24; --line: #222c39; --text: #cfd8e3;
+    --dim: #7c8798; --accent: #7ee7ff; --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.6 "Microsoft YaHei", "微软雅黑", SimHei, "Microsoft YaHei UI", "Noto Sans SC", sans-serif;
+    /* 分页化之后不再有右侧栏，改成单列铺满。
+       （原来这里是 `1fr 380px` 给 aside 留列，卡片搬进分页后右侧就成了空白） */
+    /* 三行：header(auto) / 顶部提示条(auto) / main(1fr)。
+       注意别只写 auto 1fr —— 中间多一个元素时会自己吃掉那个 1fr，
+       main 被挤到隐式行（高度 auto），内容就变成底部对齐了。 */
+    display: grid; grid-template-columns: 1fr; grid-template-rows: auto auto 1fr;
+    height: 100vh; overflow: hidden;
+  }
+  header {
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 14px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0; color: var(--accent); font-weight: 700; display: flex; align-items: center; gap: 7px; }
+  /* 顶栏 logo = 应用图标同一份素材（源文件见 src/main/index.js 的 APP_ICON） */
+  header h1 .app-logo { width: 20px; height: 20px; border-radius: 5px; display: block; }
+  .pill { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #1b2430; border: 1px solid var(--line); }
+  .pill.ok { background: #10331f; color: #86efac; }
+  .pill.off { background: #33131b; color: #fca5a5; }
+  main { overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+  aside { overflow: auto; padding: 14px; border-left: 1px solid var(--line); background: #121820; display: flex; flex-direction: column; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .card > h2 { font-size: 13px; margin: 0 0 10px; color: var(--dim); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .row:last-child { margin-bottom: 0; }
+  input[type=text], input[type=number], select, textarea {
+    background: #101720; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 9px; font: inherit; font-size: 13px; min-width: 0;
+  }
+  input[type=text] { flex: 1 1 160px; }
+  button {
+    background: #172030; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  button:hover { border-color: #3d556e; background: #1c2736; }
+  button.primary { background: #14586b; border-color: #1d7b93; color: #d9f6ff; }
+  button.primary:hover { background: #17677e; }
+  button.ghost { background: transparent; }
+  label.lbl { font-size: 12px; color: var(--dim); min-width: 62px; }
+  .now { display: flex; gap: 14px; align-items: center; }
+  .now img { width: 64px; height: 64px; border-radius: 10px; object-fit: cover; background: #1b2430; }
+  .now .t { font-size: 17px; font-weight: 700; }
+  .now .a { color: var(--dim); }
+  /*
+    进度条：视觉上仍是细条，但**可点区域要够大**。
+    原来只有 5px 高 —— 用户根本点不中（实测反馈"进度条点了不能跳转"）。
+    现在外层 18px 当命中区，内部 6px 是看得见的轨道。
+  */
+  .bar { position: relative; height: 18px; display: flex; align-items: center; margin-top: 4px; cursor: pointer; }
+  .bar::before { content: ''; position: absolute; left: 0; right: 0; height: 6px; border-radius: 3px; background: #1b2430; }
+  .bar > i { position: relative; display: block; height: 6px; width: 0; border-radius: 3px;
+             background: linear-gradient(90deg, #2bd3ff, var(--accent)); pointer-events: none; }
+  .bar:hover::before { background: #24303f; }
+  .bar:hover > i { box-shadow: 0 0 6px rgba(43, 211, 255, .55); }
+  ul.q { list-style: none; margin: 0; padding: 0; }
+  ul.q li { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px dashed #1d2632; font-size: 13px; }
+  ul.q li:last-child { border-bottom: 0; }
+  ul.q .idx { color: var(--dim); width: 20px; text-align: right; font-variant-numeric: tabular-nums; }
+  ul.q .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  ul.q .by { color: var(--dim); font-size: 12px; }
+  /* 缓存角标（2026-09-26）：一眼看出哪些歌已经能离线播 */
+  ul.q .cache-badge {
+    flex: 0 0 auto; font-size: 11px; padding: 1px 6px; border-radius: 999px;
+    white-space: nowrap; border: 1px solid transparent;
+  }
+  ul.q .cache-badge.ok { background: rgba(44, 138, 75, .22); color: #7fe0a3; border-color: rgba(44, 138, 75, .5); }
+  ul.q .cache-badge.half { background: rgba(180, 140, 40, .18); color: #e8c46a; border-color: rgba(180, 140, 40, .45); }
+  ul.q .cache-badge.none { background: rgba(120, 130, 145, .14); color: var(--dim); border-color: rgba(120, 130, 145, .3); }
+  /* 正在播放那一行：明确标出状态，和"待播"区隔开 */
+  ul.q li.q-current {
+    background: linear-gradient(90deg, rgba(43, 211, 255, .13), rgba(43, 211, 255, 0));
+    border-left: 3px solid var(--accent); padding-left: 8px; border-radius: 6px;
+  }
+  ul.q li.q-current .idx { color: var(--accent); font-weight: 700; width: 18px; }
+  ul.q li.q-current .nm { font-weight: 700; }
+  ul.q li.q-current .by { color: var(--accent); }
+  /* 拉黑粒度：带文字标签，别让用户猜这个下拉是干什么的 */
+  .bl-wrap { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+  .bl-label { font-size: 11px; color: var(--dim); }
+  .bl-wrap select { padding: 1px 4px; font-size: 12px; }
+  ul.q button { padding: 1px 7px; font-size: 12px; }
+  .log { font-size: 12px; max-height: 180px; overflow: auto; }
+  .log div { padding: 2px 0; border-bottom: 1px dashed #1a222d; }
+  .log .warn { color: var(--warn); } .log .error { color: var(--err); } .log .info { color: var(--dim); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .tip { font-size: 12px; color: var(--dim); line-height: 1.7; }
+  .addr { font-family: ui-monospace, Consolas, monospace; background: #101720; border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; word-break: break-all; }
+  .qr { background: #fff; padding: 6px; border-radius: 8px; width: 168px; height: 168px; display: grid; place-items: center; }
+  .qr img, .qr canvas { width: 156px; height: 156px; display: block; }
+  input[type=range] { flex: 1 1 120px; }
+  .swatch { width: 30px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: #101720; }
+
+  /* ---------------------------------------------------------------- 分页 */
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 12px; }
+  .tab {
+    font: inherit; font-size: 13px; padding: 7px 14px; cursor: pointer; border-radius: 8px 8px 0 0;
+    background: #131a24; color: var(--dim); border: 1px solid #1b2430; border-bottom: 0;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab.active { background: var(--card); color: var(--fg); border-color: var(--accent); }
+  .tab .cnt { font-size: 11px; opacity: .7; margin-left: 4px; }
+  [data-panel] { display: none; }
+  [data-panel].active { display: block; }
+
+  /* ---------------------------------------------------- 底部固定播放器 */
+  /* 底部固定区 = 播放器栏 + 歌词条。两个高度都做成变量，开关歌词时一起让位 */
+  :root { --pb-h: 100px; --strip-h: 0px; }
+  body { padding-bottom: calc(var(--pb-h) + var(--strip-h) + 12px); }
+
+  /* --------------------------------------------------------------- 歌词条 */
+  /* 固定在播放器**下面**（窗口最底），当播放器用的时候也能看词。
+     数据源与直播叠加层完全一样（/shared/lyric-sync.js），只是渲染更精简：
+     上一行 / 当前行（带进度填充）/ 下一行。 */
+  .lyric-strip {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 101;
+    height: var(--strip-h);
+    /*
+     * 用 **grid 三列 `1fr auto 1fr`** 而不是 flex。
+     *
+     * 为什么：flex 下三个子项基宽各不相同（空占位 / 歌词块 / 收起按钮），
+     * 歌词块会被推到偏右 —— 用户实测指出"没放正中间，偏右了"。
+     * grid 里左右两列是**同一个尺寸定义**，宽度必然相等，
+     * 所以中间那列**数学上必然居中**，而且不用去猜"收起"按钮有多宽。
+     */
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    padding: 6px 16px 8px;
+    background: linear-gradient(180deg, rgba(10, 14, 20, .94), rgba(8, 11, 16, .99));
+    border-top: 1px solid #16202c;
+    overflow: hidden;
+    transition: height .18s ease;
+  }
+  .lyric-strip[hidden] { display: none; }
+  /* min-width:0 是关键：不加的话 grid 会自动采用"内容最小宽度"当轨道下限，
+     右侧那列（有按钮）就会比左侧宽 → 又不居中了。 */
+  .ls-body { min-width: 0; text-align: center; line-height: 1.25; }
+  /*
+   * 外观**跟随叠加层的歌词设置**（`--ls-*` 由 control.js 的 applyStripStyle 同步）。
+   * 之前这里是一套写死的样式 —— 用户在面板里改字号/颜色/描边，
+   * 叠加层变了但歌词条纹丝不动，看起来就是"点了保存没变化"（用户报告）。
+   * 默认值与 DEFAULT_CONFIG.overlay 保持一致。
+   */
+  .lyric-strip {
+    --ls-fs: 18px;                 /* 当前行字号（由叠加层 fontSize 按比例缩下来） */
+    --ls-color: #5b6878;           /* 非当前行 */
+    --ls-active: var(--accent);    /* 当前行 */
+    --ls-opacity: 1;
+    --ls-stroke: none;
+  }
+  /* 控制台歌词条原来**没有字体声明**，继承的是浏览器默认（中文下是宋体）——
+     用户反馈控制台字幕也没有加粗/不是无衬线。这里显式声明与叠加层一致的无衬线粗体栈。 */
+  .lyric-strip {
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑", "Noto Sans SC", "Source Han Sans SC", "PingFang SC", Arial, sans-serif;
+  }
+  .ls-line {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    text-shadow: var(--ls-stroke);
+    transition: color .15s ease, opacity .15s ease;
+  }
+  .ls-prev, .ls-next {
+    font-size: calc(var(--ls-fs) * 0.66); color: var(--ls-color); opacity: .5;
+  }
+  .ls-cur {
+    /* 逐字/逐行渐变填充已下线（2026-09-26）→ 当前行就是**纯色强调**。
+       连带去掉了 background-clip 那套：少了每帧重绘，观感也更干净。 */
+    font-size: var(--ls-fs); font-weight: 800; margin: 1px 0;
+    color: var(--ls-active);
+  }
+  .ls-cur.ls-plain { color: var(--ls-active); }
+  .ls-trans {
+    /* 翻译行属于"当前这一句"的一部分 → 用它对应的**强调色**（不是暗灰），
+       否则双语句看起来像"只有原文被高亮"（用户报告） */
+    font-size: calc(var(--ls-fs) * 0.66); color: var(--ls-active); opacity: .72; margin-top: 1px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .ls-trans[hidden] { display: none; }
+  /* 有翻译行时歌词条高一些（播放器栏的 bottom 用同一个变量，会一起让位） */
+  .lyric-strip.with-trans { height: 94px; }
+  .ls-none { font-size: 12px; opacity: .45; }
+  .ls-side { min-width: 0; }
+  .lyric-strip .ls-tools {
+    min-width: 0; overflow: hidden;
+    display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  }
+  .lyric-strip .ls-tools button { font-size: 12px; padding: 2px 8px; }
+  .player-bar {
+    position: fixed; left: 0; right: 0; bottom: var(--strip-h); z-index: 100;
+    /* flex-wrap：窗口很窄时宁可换行，也不要各组合叠在一起（实测重叠过） */
+    display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap;
+    padding: 8px 16px; height: 100px;
+    background: rgba(13, 18, 26, .97);
+    border-top: 1px solid #1d2836;
+    box-shadow: 0 -6px 20px rgba(0, 0, 0, .35);
+  }
+  .pb-cover { width: 54px; height: 54px; border-radius: 8px; object-fit: cover; background: #1b2430; flex: 0 0 auto; }
+  /* 左侧信息区要能被压缩（min-width:0）；固定 260px 会把中间和右侧挤出去 */
+  .pb-meta { flex: 0 1 140px; min-width: 0; }
+  .pb-line1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  /* pb-name 收窄 → 加 min-width:0 让 ellipsis 真的生效（默认 min-content 会挤其他元素） */
+  .pb-name { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; }
+  /* 角标（如「· 来自缓存」）：长歌名+多角标时不能让每个字竖排 —— 加 nowrap + ellipsis。
+     grow:0 + basis:content → 角标只占自然宽度，剩余都给歌名；
+     space 不够时角标自己 ellipsize，不挤歌名 */
+  #npBadges { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto; max-width: 60%; min-width: 0; }
+  /* 中间列：上排传输控件、下排进度条 */
+  .pb-mid { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  /* 控件组允许在自己的列里换行，绝不向左/右挤出到别的组上面 */
+  .pb-ctl { display: flex; align-items: center; gap: 5px; justify-content: center; flex-wrap: wrap; }
+  /* 按钮文字一律不换行 —— 否则窄按钮里「上一首」会被压成竖排（实测如此） */
+  .pb-ctl button, .pb-right button { white-space: nowrap; font-size: 13px; padding: 4px 9px; }
+  .pb-prog { display: flex; align-items: center; gap: 8px; }
+  /* 进度条铺满中间列（.bar 本体没有宽度，是靠 flex 撑开的） */
+  .pb-prog .bar { flex: 1 1 auto; width: 100%; min-width: 180px; }
+  /* 右侧组不被压缩，但要能整体换到下一行（flex-wrap 已开） */
+  .pb-right { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; min-width: 0; }
+  .pb-right input[type=range] { width: 72px; flex: 0 1 72px; }
+  .pb-right .pill { padding: 3px 8px; font-size: 12px; white-space: nowrap; }
+  .pb-time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  /* 音量百分比在窄界面下先让位（滑杆旁边有数值反而挤） */
+  #volTxt { font-size: 12px; }
+  /* 窄一些就把非必需的（音量百分比、歌手行）让位，保证控件单行放得下 */
+  @media (max-width: 1420px) { #volTxt { display: none; } }
+  @media (max-width: 1120px) { .pb-meta { flex: 0 1 96px; } .pb-line2 { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1><img src="/assets/icon.png" alt="" class="app-logo" />NekoFM</h1>
+  <span id="stNet" class="pill off">网易云 未登录</span>
+  <span id="stRoom" class="pill off">弹幕 未连接</span>
+  <span id="stPlay" class="pill">播放 idle</span>
+  <span id="stLyric" class="pill">歌词 0 行</span>
+  <span style="margin-left:auto" class="tip">歌词叠加层 →</span>
+  <span id="addr" class="addr" style="flex:0 1 300px">—</span>
+  <button class="ghost" id="copyAddr">复制</button>
+  <span class="tip">信息卡片 →</span>
+  <span id="addrInfo" class="addr" style="flex:0 1 300px">—</span>
+  <button class="ghost" id="copyAddrInfo">复制</button>
+  <button class="ghost" id="copyAddrBoth" title="两个都显示（旧行为）">合并地址</button>
+</header>
+<div class="tip" style="padding:6px 14px 0">
+  <b>直播姬里建议加两个浏览器源</b>：一个填上面「歌词叠加层」地址、尺寸就设成你想要的歌词区域
+  （比如 1280×200）；另一个填「信息卡片」地址、尺寸贴合卡片（约 320×100）。
+  <b>浏览器源的框就是页面尺寸</b> —— 一个源里塞两样东西，框必然比各自都大得多；分开就刚刚好。
+</div>
+
+<main>
+  <!--
+    分页导航。页签内容由 JS 按卡片标题归位（见 control.js 的 TAB_OF_CARD），
+    这样新增卡片只要在这里补一条映射即可，不用改结构。
+  -->
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="queue">当前播放列表 <span class="cnt" id="cntQueue">0</span></button>
+    <button class="tab" data-tab="played">已播放 <span class="cnt" id="cntPlayed">0</span></button>
+    <button class="tab" data-tab="saved">已保存播放列表 <span class="cnt" id="cntSaved">0</span></button>
+    <button class="tab" data-tab="blacklist">已拉黑 <span class="cnt" id="cntBlack">0</span></button>
+    <button class="tab" data-tab="more">其余功能</button>
+  </nav>
+
+  <!-- 直播状态：只有「直播中 / 未直播」两种状态 -->
+  <div class="card" id="liveCard">
+    <h2>直播状态</h2>
+    <div class="row">
+      <span id="livePill" class="pill off">未直播</span>
+      <button id="btnToggleLive" class="primary">开始直播</button>
+      <span id="liveStat" class="tip"></span>
+    </div>
+    <div class="tip">
+      切到「直播中」时，「已保存播放列表」作为<b>闲时歌单</b> —— 当前列表放空后自动接着放；
+      有人点歌时它会<b>立刻让位</b>给点歌队列。<br />
+      「已保存播放列表」是<b>手动维护</b>的：想留哪首就点它旁边的「加入已保存」，
+      下播<b>不会</b>自动往里写（也不会清掉你已有的）。
+    </div>
+  </div>
+
+  <!-- 叠加层预览（原来这里还有一张"正在播放"卡片，内容已经全部搬到底部固定播放器，
+       保留只会造成同一屏里两套一样的控件） -->
+  <div class="card">
+    <h2>叠加层预览</h2>
+    <div class="row">
+      <button id="btnPreviewLyrics">预览歌词</button>
+      <button id="btnPreviewInfo">预览信息卡片</button>
+      <button id="btnPreviewBoth">预览整体</button>
+      <button id="btnPreviewAll">三个一起开</button>
+      <button id="btnOverlayHide">全部关闭</button>
+      <span id="playHint" class="tip"></span>
+    </div>
+    <div class="tip">预览窗是透明无边框的，会盖在其它窗口之上；拖动顶部工具条可移动位置，Esc 或「关闭预览」可收起。</div>
+  </div>
+
+  <!-- 点歌 -->
+  <div class="card">
+    <h2>点歌 / 检索</h2>
+    <div class="row">      <input id="kw" type="text" placeholder="歌名 / 歌手 / ID 1234567，回车即点" />
+      <select id="src">
+        <option value="">网易云</option>
+        <option value="local">本地</option>
+        <option value="bilibili">B站视频</option>
+      </select>
+      <button id="btnOrder" class="primary">点歌</button>
+      <button id="btnSearch">只搜索</button>
+    </div>
+    <div class="row">
+      <input id="bv" type="text" placeholder="直接点 B站视频：BV 号或链接" />
+      <button id="btnOrderVideo">点视频</button>
+    </div>
+    <!--
+      这里原本也放了一套「打开本地文件/文件夹」，与下方「本地音乐」卡片重复，
+      已经去掉（同一页里两套一样的按钮只会让人犹豫点哪个）。
+      本地入口统一在「本地音乐」卡片：打开文件 / 打开文件夹 / 重新扫描 / 曲库目录。
+    -->
+    <div class="tip">要放本地歌 → 用下方「本地音乐」卡片里的 <b>打开音乐文件…</b> / <b>打开音乐文件夹…</b>（和点歌一样排进当前播放列表）。</div>
+    <div id="results" class="log"></div>
+  </div>
+
+  <!-- 歌单 -->
+  <div class="card">
+    <h2>歌单导入（网易云）</h2>
+    <div class="row">
+      <input id="plInput" type="text" placeholder="歌单 ID / 链接 / 分享短链，如 3778678" />
+      <input id="plLimit" type="number" value="0" min="0" max="2000" style="width:84px" title="0 = 取全部" />
+    </div>
+    <div class="row">
+      <button id="btnPlImport" class="primary">导入并保存</button>
+      <button id="btnPlImportQueue">导入并整单入队</button>
+      <button id="btnMyPl">我的歌单</button>
+    </div>
+    <div class="tip">支持纯数字 ID、网页链接、手机分享短链（<code>163cn.tv/…</code>）。导入时自动过一遍黑名单。</div>
+    <div id="importedList" class="log"></div>
+    <div id="plList" class="log"></div>
+  </div>
+
+  <!-- 弹幕房间 -->
+  <div class="card">
+    <h2>弹幕点歌</h2>
+    <div class="tip">弹幕通道（切换后立即重连）：</div>
+    <div class="row">
+      <label class="tip" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input id="dmOpenLive" type="radio" name="dmMode" value="openlive" />
+        官方开放平台<span class="tip">最稳，不依赖浏览器；但房间由身份码绑定，只能收自己的房间</span>
+      </label>
+      <label class="tip" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input id="dmBrowser" type="radio" name="dmMode" value="browser" />
+        浏览器通道<span class="tip">可连任意直播间（下面的房间号生效）</span>
+      </label>
+    </div>
+    <div class="row">
+      <input id="room" type="text" placeholder="直播间号（短号也行，如 545068）" />
+      <button id="btnConnRoom" class="primary">连接</button>
+      <button id="btnDiscRoom">断开</button>
+    </div>
+    <div class="tip" id="roomViaTip"></div>
+
+    <!-- 开放平台凭据：选「官方开放平台」通道时才有意义 -->
+    <div id="olBox" hidden>
+      <div class="tip">
+        开放平台凭据（在 <a href="https://open-live.bilibili.com/" target="_blank">open-live.bilibili.com</a> 拿：
+        <b>项目概览</b>里有项目ID，<b>身份码</b>在互动应用中心 / 直播中心可获取）
+      </div>
+      <div class="row">
+        <input id="olKeyId" type="text" placeholder="access_key_id" style="flex:1" />
+        <input id="olKeySecret" type="password" placeholder="access_key_secret（留空则不改动已存的）" style="flex:1" />
+      </div>
+      <div class="row">
+        <input id="olAppId" type="text" placeholder="app_id（项目ID，纯数字）" style="flex:1" />
+        <input id="olAuthCode" type="text" placeholder="主播身份码（13 位）" style="flex:1" />
+        <button id="btnSaveOpenLive" class="primary">保存并重连</button>
+      </div>
+      <div class="tip" id="olInfo"></div>
+      <div class="tip">
+        ⚠️ 弹幕<b>消息类型（DM）</b>需要提前向 B站运营申请开通，否则长连建得起来但收不到弹幕
+        （QQ 群 <code>642908379</code> 或邮件 <code>live-open@bilibili.com</code>）。
+      </div>
+    </div>
+    <div class="tip">指令：<code>点歌 歌名</code> / <code>点歌 ID 歌曲ID</code> / <code>点歌 本地 歌名</code> / <code>点歌 b站 关键词</code> / <code>点播 BV号</code>（裸 BV 号 / 链接 / 小写 bv 都能自动认） / <code>切歌</code> / <code>撤歌 2</code> / <code>我的</code> / <code>队列</code></div>
+
+    <div class="tip" style="margin-top:8px">以下两行是 <b>B站账号登录</b> —— 只用来解锁「视频字幕当歌词」，<b>与上面的直播间连接无关</b>（连直播间请用上面的「连接」+ 房间号）。</div>
+    <div class="row">
+      <button id="btnBiliLogin" title="弹窗扫码登录 B站。登录后视频自带的 CC/AI 字幕能直接当歌词用">登录 B站（解锁视频字幕）</button>
+      <button id="btnBiliLogout" title="清掉 B站登录态（换号、或 cookie 过期时用）">登出</button>
+      <span id="biliStat" class="tip"></span>
+    </div>
+    <div class="row">
+      <input id="biliCookie" type="text" placeholder="或粘贴 SESSDATA=…（浏览器 F12 → Application → Cookies）" />
+      <button id="btnBiliCookie">保存</button>
+    </div>
+    <div class="tip">B站字幕（CC/AI）<b>需要登录</b>：未登录时接口一律返回空列表，视频歌词只能回落到「按标题匹配网易云」，冷门曲（游戏/同人 OST）大多匹配不到。</div>
+  </div>
+
+  <!-- 点歌设置（规则改动即时生效，不用重启） -->
+  <div class="card">
+    <h2>点歌设置</h2>
+    <div class="row">
+      <label class="lbl">每人同时最多</label>
+      <input id="cfgPerUser" type="number" min="1" max="50" style="width:70px" />
+      <label class="lbl">首 · 冷却</label>
+      <input id="cfgCooldown" type="number" min="0" max="3600" style="width:80px" />
+      <label class="lbl">秒 · 队列上限</label>
+      <input id="cfgMaxSize" type="number" min="1" max="500" style="width:80px" />
+      <label class="lbl">首</label>
+    </div>
+    <div class="row">
+      <label class="tip"><input id="cfgAllowDup" type="checkbox" /> 允许重复点同一首歌</label>
+      <label class="tip"><input id="cfgOwnSkip" type="checkbox" /> 点歌本人可切自己的歌</label>
+      <button id="btnSaveQueueCfg" class="primary">保存点歌设置</button>
+    </div>
+    <div class="tip">切歌权限：<b>点歌本人</b>、<b>房管</b>、<b>主播</b> 都可以用弹幕指令把正在放的歌切走；观众切别人的歌会被拒。取消勾选"本人可切"后，只有房管/主播能切。规则改完立即生效。</div>
+  </div>
+
+  <!-- 队列 -->
+  <div class="card">
+    <h2>当前播放列表 <span id="qCount" class="tip"></span></h2>
+    <div class="tip">点歌与「打开本地文件」一视同仁排队，<b>按顺序播放</b>。第一行是<b>正在播放</b>的那首；播完会移到「已播放」（手动切走的也算播完）。</div>
+    <ul id="queue" class="q"></ul>
+    <div class="row" style="margin-top:8px">
+      <button id="btnClearQ">清空队列</button>
+      <span class="tip">每项可「置顶」或直接拉黑（拉黑会同时把它撤下队列）</span>
+    </div>
+  </div>
+
+  <!-- 已播放 -->
+  <div class="card">
+    <h2>已播放 <span id="histCount" class="tip"></span></h2>
+    <ul id="histList" class="q" style="max-height:320px;overflow:auto"></ul>
+    <div class="row" style="margin-top:8px">
+      <button id="btnClearHist">清空已播放</button>
+      <span class="tip">从当前播放列表播完的（含被手动切掉的）都会到这里</span>
+    </div>
+  </div>
+
+  <!-- 已保存播放列表 -->
+  <div class="card">
+    <h2>已保存播放列表 <span id="savedCount" class="tip"></span></h2>
+    <div class="tip">
+      <b>未直播</b>时：它就是一张可以直接播放的<b>本地歌单</b>（播放模式、上一首/下一首全都生效）。<br />
+      <b>直播中</b>时：它固定作为<b>闲时歌单</b> —— 当前播放列表放空后自动接着放；
+      有人点歌时立刻让位给点歌队列。<br />
+      这个列表<b>只靠手动添加</b>（列表项上的「加入已保存」，或下面的来源按钮）。
+    </div>
+    <div class="row">
+      <button id="btnPlaySaved" class="primary">播放已保存歌单</button>
+      <span id="playSavedHint" class="tip">未直播时可直接播放</span>
+    </div>
+    <ul id="savedList" class="q" style="max-height:320px;overflow:auto"></ul>
+    <div class="row" style="margin-top:8px">
+      <button id="btnQueueSaved">整份排进当前队列</button>
+      <button id="btnClearSaved">清空已保存</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label class="lbl">从其他来源加入：</label>
+      <button id="btnSavedFromFav">我的收藏</button>
+      <button id="btnSavedFromLocal">本地曲库</button>
+      <button id="btnSavedFromPl">已导入歌单</button>
+      <span class="tip">无论来源，一视同仁汇入这个列表</span>
+    </div>
+  </div>
+
+  <!-- 闲时歌单 -->
+  <div class="card">
+    <h2>闲时歌单</h2>
+    <div class="row">
+      <label class="tip"><input id="idleEnabled" type="checkbox" /> 无点歌任务时自动播放</label>
+      <span id="idleStat" class="tip"></span>
+    </div>
+    <div class="row">
+      <label class="tip"><input id="idleShuffle" type="checkbox" /> 随机顺序</label>
+      <label class="lbl">近期不重复</label><input id="idleAvoid" type="number" min="0" max="100" style="width:70px" />
+      <button id="btnSaveIdle" class="primary">保存</button>
+    </div>
+    <div class="tip">
+      <b>闲时播放的内容就是「已保存播放列表」</b> —— 不管歌来自网易云歌单、本地曲库还是收藏，
+      都先「加入已保存」，再由这一个列表统一充当闲时歌单。队列空了就自动接着播，点歌一进来就会盖过它。
+    </div>
+  </div>
+
+  <!-- 媒体缓存 -->
+  <div class="card">
+    <h2>在线缓存</h2>
+    <div class="row">
+      <label class="tip"><input id="cacheEnabled" type="checkbox" /> 缓存放过的在线歌曲</label>
+      <span id="cacheStat" class="tip"></span>
+    </div>
+    <!-- 批量操作（2026-09-26）：避免一条一条点 -->
+    <div class="row">
+      <button id="btnCachePrefetchSaved" title="把「已保存播放列表」里所有在线曲目预先下载下来，直播时完全不吃网（后台串行跑，不影响当前播放）">批量缓存已保存列表</button>
+      <button id="btnCachePrefetchHist" title="把「已播放」里的在线曲目预先下载下来">批量缓存已播放</button>
+      <button id="btnCacheClearLyrics" title="只删歌词缓存、保留音频。适合歌词配错想重新匹配时用 —— 音频几十 MB 要重下，歌词删了几乎零代价">只清歌词</button>
+      <button id="btnCacheDropOrphans" title="删掉「缓存里有、但不在已保存播放列表 / 收藏里」的曲目。直播间随手点的歌大多是一次性的，留着只会把 2GB 塞满、再被 LRU 挤掉你常听的那批。正在播放的那首会自动跳过。">清理非已保存缓存</button>
+      <button id="btnCacheClear" title="音频 + 歌词一起清">清空全部缓存</button>
+      <span id="cacheBusy" class="tip"></span>
+    </div>
+    <div class="row">
+      <label class="lbl">缓存目录</label>
+      <input id="cacheDir" type="text" placeholder="留空 = 程序目录\\data\\cache（默认不写系统盘）" style="flex:1;min-width:220px" />
+      <button id="btnPickCacheDir">选择目录…</button>
+      <button id="btnSaveCacheDir" class="primary">保存</button>
+    </div>
+    <div class="tip" id="cacheDirNow">当前目录：—</div>
+    <div class="tip">歌曲音频、封面、歌词**都放在这个目录下面**。默认在程序目录里，
+      <b>不会写到 C 盘</b>；想放别的大盘上就换一个目录（换目录不会删除旧文件）。</div>
+    <div class="tip">首次播放仍走远端直链（不卡声音），后台落盘；下次点同一首直接读本地，
+      不受直链过期影响。<b>45 秒试听片段不会缓存</b>。</div>
+    <div class="tip">下面每一条都可以单独 <b>删缓存</b>；「已播放」「已保存」列表里的每一行也都有
+      <b>缓存 / 删缓存</b> 按钮（已缓存的会显示绿色角标）。</div>
+    <ul id="cacheList" class="q"></ul>
+  </div>
+
+  <!-- 测试中心 -->
+  <div class="card">
+    <h2>测试中心 / 自检</h2>
+    <div class="row">
+      <label class="tip"><input id="tcNet" type="checkbox" /> 包含联网项（打真实接口，约 10 秒）</label>
+    </div>
+    <div class="row">
+      <button id="tcRunAll" class="primary">运行全部</button>
+      <span id="tcSummary" class="tip"></span>
+    </div>
+    <div id="tcGroups" class="row"></div>
+    <div id="tcResults" class="log" style="max-height:340px"></div>
+    <div class="tip">命令行也能跑：<code>node tools\headless.js --testcenter</code>（加 <code>--net</code> 含联网）。</div>
+  </div>
+</main>
+
+<aside>
+  <!-- 网易云登录 -->
+  <div class="card">
+    <h2>网易云登录（会员曲必需）</h2>
+    <div class="row"><button id="btnQr" class="primary">生成扫码二维码</button><button id="btnBrowserLogin">打开登录窗（浏览器会话）</button><button id="btnNetStatus" title="向网易云核验一次，确认到底登没登进去">检测登录状态</button><button id="btnNetLogout" title="清掉 persistent partition 的全部 storage 和配置里的 cookie；下次扫码登新账号" style="margin-left:8px">登出（换号）</button><span id="qrStat" class="tip"></span></div>
+    <div class="row"><div id="qrBox" class="qr" hidden></div></div>
+    <div class="tip" id="netStatus">登录状态未知 —— 点「检测登录状态」核验</div>
+    <div class="tip">扫码后自动保存 cookie。没登录时会员曲只能放 45 秒试听片段。<br />
+      「打开登录窗」会弹出一个真实浏览器窗口，登录一次即可：会话会持久保存，
+      既是登录手段，也是接口被掐时的<b>取流退路</b>。</div>
+    <div class="row" style="margin-top:8px">
+      <input id="cookie" type="text" placeholder="也可直接粘贴 MUSIC_U cookie" />
+      <button id="btnCookie">保存</button>
+    </div>
+  </div>
+
+  <!-- 播放核心 -->
+  <div class="card">
+    <h2>播放核心 / 输出设备</h2>
+    <div class="row">
+      <select id="device" style="flex:1"></select>
+      <button id="btnShowPlayer">打开窗口</button>
+    </div>
+    <div class="tip" id="devHint">当前：系统默认</div>
+    <div class="tip">把输出选到 VoiceMeeter 的音乐通道（如 <code>Voicemeeter Aux Input</code> / <code>CABLE Input</code>），好处是游戏声与音乐声互不干扰。选择会被记住，重启后自动恢复。</div>
+  </div>
+
+  <!-- 叠加层设置 -->
+  <div class="card">
+    <h2>歌词叠加层</h2>
+    <div class="row">
+      <label class="lbl">样式</label>
+      <!--
+        只保留两个主题（2026-09-26 用户定的）：
+          · 单行滚动 —— 纯原文，当前行高亮
+          · 双语     —— 双行 + 中文翻译
+        原来的「逐字卡拉OK」「桌面歌词风」已去掉：前者用户不需要，
+        后者**只在直播画面里有区别**、在控制台歌词条里跟别的长得一样，
+        留着只会让人以为是坏的。逐字染色现在由「逐字」勾选框独立控制，
+        不再绑在主题上（所以"双语 + 逐字"这种组合依然可用）。
+      -->
+      <select id="oTheme" style="flex:1">
+        <option value="scroll">单行滚动（纯原文 + 当前行高亮）</option>
+        <option value="dual">双语（双行 + 中文翻译）</option>
+      </select>
+    </div>
+    <div class="row"><label class="lbl">字号</label><input id="oSize" type="range" min="16" max="96" /><span id="oSizeTxt" class="tip"></span></div>
+    <div class="row">
+      <label class="tip"><input id="oScaleFont" type="checkbox" /> 字号随源尺寸缩放（只有"源铺满整个画面"时才勾）</label>
+    </div>
+    <div class="tip">默认**不勾**：字号就是上面滑块的值 —— 配合「把浏览器源的框设成组件尺寸」用，
+      框设多大、字幕就正好占多大，所见即所得。<br />
+      勾上则按源高等比缩放（1080p 基准），适合把源铺满整个画面的用法。</div>
+    <div class="tip" id="oBoxHint">—</div>
+    <div class="row"><label class="lbl">透明度</label><input id="oOpacity" type="range" min="10" max="100" /><span id="oOpTxt" class="tip"></span></div>
+    <div class="row"><label class="lbl">歌词底板</label><input id="oBackdrop" type="range" min="0" max="95" /><span id="oBdTxt" class="tip"></span></div>
+    <div class="row"><label class="lbl">底板颜色</label><input id="oBdColor" class="swatch" type="color" /></div>
+    <div class="tip">「歌词底板」给字幕垫一条半透明深色带 —— 文字融进画面时（比如浅青高亮落在青蓝色游戏画面上）这是**最稳**的一招，
+      任意背景都看得清。0 = 关；<b>35~55</b> 最常用。</div>
+    <div class="row">
+      <label class="lbl">正文色</label><input id="oColor" class="swatch" type="color" />
+      <label class="lbl">高亮色</label><input id="oActive" class="swatch" type="color" />
+      <label class="lbl">描边色</label><input id="oStroke" class="swatch" type="color" />
+    </div>
+    <div class="row">
+      <label class="lbl">描边宽</label><input id="oStrokeW" type="range" min="0" max="12" /><span id="oSwTxt" class="tip"></span>
+    </div>
+    <div class="tip">显示行数：<b>只显示当前这一句</b> —— 勾了「显示翻译」就是「原文 + 译文」两行，
+      不勾则只有一行原文。（翻译字号与原文一致）<br />
+      源的框高度按 <b>1 行 ≈ 66px、2 行 ≈ 120px</b> 填最贴合。</div>
+    <div class="row"><label class="lbl">歌词偏移</label><input id="oOffset" type="number" step="50" style="width:90px" /><span class="tip">毫秒，正值=歌词延后</span></div>
+    <div class="row">
+      <label class="tip"><input id="oTrans" type="checkbox" /> 显示翻译</label>
+      <label class="tip"><input id="oRoma" type="checkbox" /> 罗马音</label>
+      <!-- 「逐字」勾选框已移除（2026-09-26：逐字染色功能下线） -->
+      <label class="tip"><input id="oCard" type="checkbox" /> 信息卡</label>
+    </div>
+    <div class="row"><button id="btnSaveOverlay" class="primary">应用并保存</button></div>
+  </div>
+
+  <!-- 播放器信息栏 -->
+  <div class="card">
+    <h2>播放器信息栏</h2>
+    <div class="row">
+      <label class="tip"><input id="ibEnabled" type="checkbox" /> 显示信息栏</label>
+      <span class="tip">（封面/歌名/点歌者/进度条/下一首）</span>
+    </div>
+    <div class="row">
+      <label class="lbl">位置</label>
+      <select id="ibPos" style="flex:1">
+        <option value="top-left">左上</option>
+        <option value="top-right">右上</option>
+        <option value="top-center">顶部居中</option>
+        <option value="bottom-left">左下</option>
+        <option value="bottom-right">右下</option>
+        <option value="bottom-center">底部居中</option>
+      </select>
+    </div>
+    <div class="row">
+      <label class="lbl">风格</label>
+      <select id="ibTheme" style="flex:1">
+        <option value="card">卡片（带半透明底）</option>
+        <option value="minimal">极简（无底，纯文字）</option>
+      </select>
+    </div>
+    <div class="row"><label class="lbl">缩放</label><input id="ibScale" type="range" min="60" max="160" /><span id="ibScaleTxt" class="tip"></span></div>
+    <div class="row"><label class="lbl">透明度</label><input id="ibOpacity" type="range" min="10" max="100" /><span id="ibOpTxt" class="tip"></span></div>
+    <div class="row"><label class="lbl">封面大小</label><input id="ibCoverSize" type="range" min="32" max="140" /><span id="ibCoverTxt" class="tip"></span></div>
+    <div class="row"><label class="lbl">强调色</label><input id="ibAccent" class="swatch" type="color" /></div>
+    <div class="grid2">
+      <label class="tip"><input id="ibCover" type="checkbox" /> 封面</label>
+      <label class="tip"><input id="ibRequester" type="checkbox" /> 点歌者</label>
+      <label class="tip"><input id="ibSource" type="checkbox" /> 音源角标</label>
+      <label class="tip"><input id="ibProgress" type="checkbox" /> 进度条</label>
+      <label class="tip"><input id="ibTime" type="checkbox" /> 时间</label>
+      <label class="tip"><input id="ibUpNext" type="checkbox" /> 下一首</label>
+      <label class="tip"><input id="ibBiliStats" type="checkbox" /> B站信息</label>
+      <label class="tip"><input id="ibHideIdle" type="checkbox" /> 空闲时隐藏</label>
+    </div>
+    <div class="row"><button id="btnSaveInfoBar" class="primary">应用并保存</button></div>
+  </div>
+
+  <!-- 黑名单 / 审核 -->
+  <div class="card">
+    <h2>黑名单 / 审核</h2>
+    <div class="row">
+      <label class="tip"><input id="blEnabled" type="checkbox" /> 启用拦截</label>
+      <span id="blCount" class="tip"></span>
+      <button id="btnBlPurge">清理队列中违规曲目</button>
+    </div>
+    <div class="row">
+      <select id="blType">
+        <option value="keyword">标题关键词</option>
+        <option value="artist">歌手</option>
+        <option value="song">歌曲 ID</option>
+        <option value="bvid">B站 BV 号</option>
+      </select>
+      <input id="blValue" type="text" placeholder="要拦截的内容" />
+      <button id="btnBlAdd" class="primary">添加</button>
+    </div>
+    <div class="row">
+      <button id="btnBlBlockCurrent">拉黑当前曲目</button>
+      <button id="btnBlBlockKw">拉黑当前曲名（关键词）</button>
+      <button id="btnBlClear">清空</button>
+    </div>
+    <ul id="blList" class="q"></ul>
+    <div class="tip">命中黑名单的点歌会被直接拒绝（并提示观众），歌单导入时也会被过滤掉。
+      关键词/歌手是<b>子串匹配</b>，忽略大小写与空格标点。</div>
+  </div>
+
+  <!-- 演练 / 注入 -->
+  <div class="card">
+    <h2>演练 / 注入（不需要开播）</h2>
+    <div class="row">
+      <button id="btnDemoStart" class="primary">开始演示</button>
+      <button id="btnDemoStop">结束演示</button>
+      <span id="demoStat" class="tip"></span>
+    </div>
+    <div class="tip">演示模式用一套假曲目+假歌词驱动叠加层，<b>不联网、不出声</b>，调歌词与信息栏样式时最方便。</div>
+    <div class="row">
+      <input id="injText" type="text" placeholder="注入一条假弹幕，如：点歌 孤勇者" />
+      <button id="btnInject">注入</button>
+      <label class="tip"><input id="injAdmin" type="checkbox" /> 房管身份</label>
+    </div>
+    <div class="tip">注入弹幕用来验证指令解析 / 权限 / 队列 / 黑名单，不用真的开播。</div>
+  </div>
+
+  <!-- 本地音乐 -->
+  <div class="card">
+    <h2>本地音乐</h2>
+    <div class="row">
+      <button id="btnOpenFiles" class="primary">打开音乐文件…</button>
+      <button id="btnOpenFolder">打开音乐文件夹…</button>
+      <button id="btnRescan">重新扫描</button>
+      <span id="localStat" class="tip"></span>
+    </div>
+    <div class="tip">「打开文件」会立刻播放并放进队列；「打开文件夹」会把整个目录加入曲库并记住（下次启动自动加载）。</div>
+    <div class="row" style="margin-top:8px">
+      <input id="localDirs" type="text" placeholder="曲库目录，多个用 ; 分隔（如 D:/Music;E:/歌）" />
+      <button id="btnSaveDirs">保存目录</button>
+    </div>
+    <div class="row">
+      <input id="localSearch" type="text" placeholder="在曲库里搜索…" />
+      <button id="btnLocalSearch">搜索</button>
+      <button id="btnLocalAll">全部</button>
+    </div>
+    <ul id="localList" class="q" style="max-height:280px;overflow:auto"></ul>
+  </div>
+
+  <!-- 日志 -->
+  <div class="card">
+    <h2>提示 / 日志</h2>
+    <div id="log" class="log"></div>
+  </div>
+</aside>
+
+<!--
+  底部固定播放器栏：**任何页面都一直显示**。
+  里面的封面/歌名/进度条/传输按钮等节点由 control.js 从上方卡片迁移过来
+  （保留原有 id，所以原有事件绑定全部继续有效）。
+-->
+<footer class="player-bar" id="playerBar">
+  <img id="cover" class="pb-cover" alt="" />
+  <div class="pb-meta">
+    <div class="pb-line1">
+      <span id="name" class="pb-name">—</span>
+      <span id="npBadges" class="tip"></span>
+    </div>
+    <div class="pb-line2">
+      <span id="artist" class="tip">—</span>
+      <span id="srcTag" class="tip">·</span>
+      <span id="lyricTag" class="tip">·</span>
+    </div>
+  </div>
+  <div class="pb-mid">
+    <div class="pb-ctl" id="pbCtl">
+      <button id="btnPrev" title="上一首">⏮ 上一首</button>
+      <button id="btnPlayToggle" class="primary" title="播放/暂停">▶/⏸</button>
+      <button id="btnSkip" title="下一首（工具本地操作，不受弹幕权限限制）">⏭ 下一首</button>
+      <span id="modeGroup">
+        <button class="mode" data-mode="order" title="顺序播放">顺序</button>
+        <button class="mode" data-mode="repeat-all" title="列表循环">列表</button>
+        <button class="mode" data-mode="repeat-one" title="单曲循环">单曲</button>
+        <button class="mode" data-mode="shuffle" title="随机播放">随机</button>
+      </span>
+    </div>
+    <div class="pb-prog" id="pbProg">
+      <div class="bar" id="seekBar" title="点击/拖动可跳转"><i id="prog"></i></div>
+      <span id="time" class="tip pb-time">0:00 / 0:00</span>
+    </div>
+  </div>
+  <div class="pb-right" id="pbRight">
+    <button id="btnFavorite" title="收藏">☆ 收藏</button>
+    <button id="btnLyricStrip" title="显示/隐藏底部歌词条（当播放器用时看词）">歌词</button>
+    <button id="btnMute" title="静音">🔊</button>
+    <span id="volTxt" class="tip">100%</span>
+    <input id="vol" type="range" min="0" max="100" value="100" title="音量" />
+  </div>
+</footer>
+
+<!--
+  底部歌词条：固定在播放器**下面**（窗口最底边），当播放器用的时候也能看词。
+  数据源与直播姬的叠加层完全一致（同一份 /shared/lyric-sync.js + 同一条 SSE），
+  所以两边显示的行、逐字进度一定是对齐的 —— 不会出现"控制台和画面不同步"。
+-->
+<div class="lyric-strip" id="lyricStrip" hidden>
+  <div class="ls-side"></div>
+  <div class="ls-body">
+    <div class="ls-line ls-prev" id="lsPrev"></div>
+    <div class="ls-line ls-cur" id="lsCur">♪</div>
+    <!-- 翻译行：跟随叠加层设置的「翻译」开关显隐（双语就靠它） -->
+    <div class="ls-line ls-trans" id="lsTrans" hidden></div>
+    <div class="ls-line ls-next" id="lsNext"></div>
+  </div>
+  <div class="ls-tools">
+    <button id="btnLyricClose" title="隐藏歌词条（可以随时用播放器上的「歌词」按钮再打开）">收起</button>
+  </div>
+</div>
+
+<script src="/shared/lyric-sync.js"></script>
+<script src="/assets/control.js"></script>
+</body>
+</html>

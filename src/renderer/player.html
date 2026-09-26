@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>NekoFM 播放核心</title>
+<!-- CSP（响应头 + 本页 <head> 里的 meta）由 src/main/server.js 按 CSP_POLICY 统一注入，
+     这里不要手写：写进 <title> 会因 RCDATA 规则整段变成纯文本、CSP 完全不生效（实测踩到）。 -->
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; font: 13px/1.6 "Microsoft YaHei UI", system-ui, sans-serif;
+    background: #0f1319; color: #cfd8e3; display: flex; flex-direction: column;
+    height: 100vh; overflow: hidden;
+  }
+  header { padding: 10px 14px; border-bottom: 1px solid #1e2530; display: flex; align-items: center; gap: 10px; }
+  header b { color: #7ee7ff; }
+  .status { margin-left: auto; font-size: 12px; padding: 2px 10px; border-radius: 999px; background: #1b2430; }
+  .status.playing { background: #10404a; color: #9fe9ff; }
+  .status.error { background: #4a1220; color: #ffb3c0; }
+  main { flex: 1; overflow: auto; padding: 14px; }
+  .row { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  label { font-size: 12px; color: #8b98a8; }
+  select, button { background: #172030; color: #cfd8e3; border: 1px solid #26313f; border-radius: 8px; padding: 6px 10px; font-size: 13px; }
+  button:hover { border-color: #3d556e; }
+  button.primary { background: #14586b; border-color: #1d7b93; color: #d9f6ff; }
+  .meter { height: 6px; border-radius: 3px; background: #1b2430; overflow: hidden; margin: 8px 0 4px; }
+  .meter > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #2bd3ff, #7ee7ff); }
+  .kv { display: grid; grid-template-columns: 76px 1fr; gap: 4px 12px; font-size: 12px; }
+  .kv span:nth-child(odd) { color: #7c8798; }
+  .hint { font-size: 12px; color: #6b7787; margin-top: 10px; line-height: 1.7; }
+  code { background: #17202c; padding: 1px 5px; border-radius: 5px; }
+  .err { color: #ff9db0; font-size: 12px; }
+</style>
+</head>
+<body>
+  <header>
+    <b>播放核心</b>
+    <span id="devLabel" class="status">设备：默认</span>
+    <span id="status" class="status">idle</span>
+  </header>
+
+  <main>
+    <div class="row">
+      <label>输出设备</label>
+      <select id="device"></select>
+      <button id="refreshDev">刷新</button>
+      <button id="testTone">测试音（1kHz）</button>
+    </div>
+
+    <div class="row">
+      <label>音量</label>
+      <input id="volume" type="range" min="0" max="100" value="100" style="flex:1;min-width:160px" />
+      <span id="volText">100%</span>
+    </div>
+
+    <div class="meter"><i id="bar"></i></div>
+    <div class="kv">
+      <span>曲目</span><span id="kName">—</span>
+      <span>进度</span><span id="kTime">0:00 / 0:00</span>
+      <span>流地址</span><span id="kUrl" style="word-break:break-all">—</span>
+      <span>错误</span><span id="kErr" class="err">—</span>
+    </div>
+
+    <div class="hint">
+      这个窗口就是直播放声的进程。请在 <b>VoiceMeeter</b> / Windows 音量合成器里把它的输出接到你的音乐通道。<br />
+      设备下拉来自 <code>setSinkId</code>，可直接选 <code>VoiceMeeter Aux Input</code> 或 <code>CABLE Input</code>。
+    </div>
+  </main>
+
+  <audio id="audio" preload="auto"></audio>
+  <script src="/assets/player.js"></script>
+</body>
+</html>

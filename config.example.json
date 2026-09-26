@@ -1,0 +1,150 @@
+{
+  "server": {
+    "port": 37821,
+    "host": "127.0.0.1"
+  },
+  "netease": {
+    "cookie": "",
+    "level": "exhigh",
+    "encodeType": "aac",
+    "defaultSource": "netease"
+  },
+  "bilibili": {
+    "cookie": "",
+    "roomId": "",
+    "danmakuMode": "openlive",
+    "autoConnect": true,
+    "replyInDanmaku": false,
+    "openLive": {
+      "enabled": false,
+      "accessKeyId": "",
+      "accessKeySecret": "",
+      "appId": "",
+      "roomOwnerAuthCode": ""
+    }
+  },
+  "local": {
+    "autoSaveLyrics": true,
+    "dirs": [],
+    "enabled": true
+  },
+  "queue": {
+    "maxSize": 50,
+    "perUserMax": 2,
+    "cooldownMs": 60000,
+    "dedupeWindowMs": 1800000,
+    "allowDuplicate": false,
+    "privilegedUids": [],
+    "danmakuSkip": {
+      "ownOnly": true
+    }
+  },
+  "commands": {
+    "order": [
+      "点歌",
+      "点播",
+      "来一首",
+      "点一首"
+    ],
+    "skip": [
+      "切歌",
+      "跳过",
+      "下一首",
+      "next"
+    ],
+    "remove": [
+      "撤歌",
+      "删除",
+      "撤销"
+    ],
+    "mine": [
+      "我的",
+      "我的歌",
+      "查询"
+    ],
+    "queue": [
+      "队列",
+      "歌单",
+      "列表",
+      "queue"
+    ],
+    "lyricToggle": [
+      "歌词"
+    ],
+    "volume": [
+      "音量"
+    ]
+  },
+  "blacklist": {
+    "enabled": true,
+    "rules": []
+  },
+  "playlists": {
+    "imported": []
+  },
+  "favorites": [],
+  "savedPlaylist": [],
+  "playback": {
+    "mode": "order"
+  },
+  "idle": {
+    "enabled": false,
+    "source": "netease",
+    "playlistId": "",
+    "shuffle": true,
+    "avoidRecent": 10
+  },
+  "cache": {
+    "enabled": true,
+    "maxMB": 2048,
+    "maxFileMB": 120,
+    "dir": ""
+  },
+  "overlay": {
+    "theme": "scroll",
+    "fontSize": 42,
+    "scaleFont": false,
+    "fontFamily": "\"Microsoft YaHei UI\", \"Noto Sans SC\", system-ui, sans-serif",
+    "color": "#ffe9a8",
+    "activeColor": "#ffd54a",
+    "strokeColor": "#000000",
+    "strokeWidth": 2.5,
+    "opacity": 1,
+    "backdrop": 0.75,
+    "backdropColor": "#000000",
+    "align": "center",
+    "showTranslation": true,
+    "showRoma": false,
+    "linesBefore": 1,
+    "linesAfter": 1,
+    "offsetMs": 0,
+    "showTrackCard": true,
+    "hideAfterIdleMs": 0,
+    "width": 1280,
+    "height": 200,
+    "infoBar": {
+      "enabled": true,
+      "position": "top-left",
+      "theme": "card",
+      "scale": 1,
+      "opacity": 1,
+      "showCover": true,
+      "showRequester": true,
+      "showSource": true,
+      "showProgress": true,
+      "showTime": true,
+      "showUpNext": true,
+      "showBiliStats": true,
+      "hideWhenIdle": true,
+      "accentColor": "#7ee7ff",
+      "coverSize": 64
+    }
+  },
+  "player": {
+    "volume": 1,
+    "muted": false,
+    "deviceId": "",
+    "deviceLabel": "",
+    "prerollMs": 350
+  }
+}

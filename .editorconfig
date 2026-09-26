@@ -1,0 +1,21 @@
+# NekoFM 编辑器统一设置
+# 源码缩进 2 空格；文档不要尾随空格；统一 UTF-8 + LF（.bat 例外，见 .gitattributes）
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.md]
+# Markdown 里行尾双空格是有意义的硬换行，别自动裁掉
+trim_trailing_whitespace = false
+
+[*.bat]
+end_of_line = crlf
+
+[*.{png,ico,jpg,webp}]
+insert_final_newline = false

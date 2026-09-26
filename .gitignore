@@ -1,0 +1,32 @@
+# ============================================================================
+#  NekoFM · 什么不进版本库
+#  原则：**运行时数据一律不入库**。data/ 里有登录态 cookie、开放平台密钥、
+#        缓存音频与 Electron 会话，属于每个使用者自己的东西，不进任何仓库。
+# ============================================================================
+
+# ---- 依赖与构建产物 ----
+node_modules/
+release/
+dist/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# ---- 运行时数据（配置 / 缓存 / 封面 / Electron 登录会话）----
+# config.json 含网易云 cookie、B站 cookie、直播开放平台 accessKeySecret，
+# data/electron 含 Chromium 的 Cookies 库 —— 绝不能提交。
+data/
+
+# ---- 内部文档与 AI 会话产物（含本机路径与个人反馈）----
+PROGRESS.md
+.zcode/
+.playwright-mcp/
+
+# ---- 本机专用清理脚本（依赖作者历史部署路径，对其他人无意义）----
+tools/cleanup-c-drive.js
+cleanup-c-drive.bat
+
+# ---- 根目录临时构建物（图标生成过程的中间产物）----
+nekofm-icon-*.png
+icon-sizes.txt

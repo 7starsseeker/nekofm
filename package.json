@@ -1,0 +1,79 @@
+{
+  "name": "nekofm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "B站直播用音乐播放 + 实时歌词系统（网易云 / 本地 / B站弹幕点歌 / 直播姬歌词叠加层）",
+  "license": "Apache-2.0",
+  "author": "NekoFM contributors",
+  "homepage": "https://github.com/7starsseeker/nekofm#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/7starsseeker/nekofm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/7starsseeker/nekofm/issues"
+  },
+  "keywords": [
+    "bilibili",
+    "live-streaming",
+    "lyrics",
+    "karaoke",
+    "netease-cloud-music",
+    "danmaku",
+    "electron",
+    "overlay"
+  ],
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/lrc.test.js && node test/queue.test.js && node test/blacklist.test.js && node test/local.test.js && node test/player.test.js",
+    "test:e2e": "node test/e2e.test.js",
+    "test:live": "node test/netease.live.js && node test/bilibili.live.js",
+    "test:center": "node tools/headless.js --testcenter",
+    "test:center:net": "node tools/headless.js --testcenter --net",
+    "smoke": "electron . --smoke",
+    "check:secrets": "node tools/check-no-secrets.js",
+    "config:example": "node tools/gen-config-example.js",
+    "headless": "node tools/headless.js",
+    "pack": "electron-builder --win && node tools/link-data.js",
+    "pack:dir": "electron-builder --win --dir",
+    "pack:release": "electron-builder --win --dir && node tools/make-release-zip.js",
+    "link-data": "node tools/link-data.js"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "build": {
+    "appId": "com.nekofm.desktop",
+    "productName": "NekoFM",
+    "copyright": "Copyright 2026 NekoFM contributors",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "LICENSE",
+      "NOTICE",
+      "!**/*.map",
+      "!**/node_modules/**/{test,__tests__,docs,example,examples}/**"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "publish": null
+  }
+}

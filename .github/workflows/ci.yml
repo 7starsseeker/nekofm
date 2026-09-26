@@ -1,0 +1,90 @@
+name: CI
+
+# 这些测试全部**不依赖 Electron**（`src/core/` 与 `src/main/` 的纯 Node 部分），
+# 所以不需要 npm install，跑得很快。
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上新的 push 会取消还在跑的旧任务
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- 卫生检查
+  hygiene:
+    name: 入库自检（凭据 / 示例配置同步）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 确认没有凭据或运行时数据进了版本库
+        run: npm run check:secrets
+
+      - name: 确认 config.example.json 与 DEFAULT_CONFIG 同步
+        run: |
+          npm run config:example
+          if ! git diff --quiet -- config.example.json; then
+            echo "::error::config.example.json 与 src/core/config.js 的 DEFAULT_CONFIG 不一致 —— 请跑 npm run config:example 后提交"
+            git diff -- config.example.json
+            exit 1
+          fi
+
+      - name: 全部 JS 语法可解析
+        shell: bash
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            node --check "$f" || fail=1
+          done < <(git ls-files '*.js')
+          exit $fail
+
+      # 明文 .bat 里出现非 ASCII 会让 cmd.exe 按 936 代码页解析时乱码甚至执行错命令
+      - name: 批处理必须纯 ASCII
+        shell: bash
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if LC_ALL=C grep -qP '[^\x00-\x7F]' "$f"; then
+              echo "::error file=$f::.bat 里出现了非 ASCII 字符（中文必须由 Node 脚本输出）"
+              fail=1
+            fi
+          done < <(git ls-files '*.bat')
+          exit $fail
+
+  # ------------------------------------------------------------------ 跑测试
+  test:
+    name: 测试（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 本地曲库测试要用 ffmpeg 现场生成音频素材；Ubuntu 运行器自带，Windows 需要装
+      - name: 安装 FFmpeg（Windows）
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 端到端集成测试
+        run: npm run test:e2e
+
+      - name: 内置测试中心（离线项）
+        run: npm run test:center
