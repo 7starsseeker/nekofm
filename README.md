@@ -208,7 +208,7 @@ B站直播用的**音乐播放 + 实时歌词**系统。用你自己的网易云
 
 **方式一：下载发布包（推荐，不用装 Node）**
 
-到 [Releases](../../releases) 下载 `NekoFM-<版本>-win-x64.zip`，解压到任意目录，
+到 [Releases](https://github.com/7starsseeker/nekofm/releases) 下载 `NekoFM-<版本>-win-x64.zip`，解压到任意目录，
 双击 `NekoFM.exe` 即可（绿色版，数据全在 exe 同目录的 `data/`，整个文件夹拷走就能换机）。
 
 **方式二：从源码跑**
