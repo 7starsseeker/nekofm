@@ -4,6 +4,7 @@
  * 只依赖系统 ffmpeg/ffprobe（用户机器已装 FFmpeg 9.0.2）。
  *   - scan()    递归扫描目录，读时长/标题/艺术家
  *   - lyrics()  歌词优先级：同名 .lrc 文件 → 内嵌 USLT/LYRICS 标签
+ *               （.lrc 是别人写的，编码按 BOM/UTF-8/GB18030 自动识别，见 core/text-file.js）
  *
  * 扫描结果带缓存（按 mtime），避免每次启动全盘重扫。
  */
@@ -13,6 +14,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
+
+const { readTextFile } = require('../../core/text-file');
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg', '.opus', '.wma', '.ape', '.mp4']);
 const LRC_EXT = new Set(['.lrc']);
@@ -127,6 +130,10 @@ class LocalLibrary {
   /**
    * 取本地歌词。返回 {lrc, tlyric, source}。
    * 顺序：同名 .lrc → .trans.lrc 翻译 → 内嵌标签
+   *
+   * **读 .lrc 必须走 readTextFile（不要直接 readFileSync(..., 'utf8')）**：
+   * 这些文件不是我们写的，很多是 GBK/GB2312 或 UTF-16LE 的老文件，
+   * 按 UTF-8 硬读会得到满屏乱码（见 core/text-file.js 里的实测数据）。
    */
   async lyrics(file) {
     const dir = path.dirname(file);
@@ -155,8 +162,8 @@ class LocalLibrary {
       // 现在逐字不渲染了，所以**标准版优先**（内容一样，还省一次内联时间戳解析）；
       // 只有旧的逐字文件存在、标准版缺失时才用它兜底
       const main = lrcPath || karaokePath;
-      const lrc = fs.readFileSync(main, 'utf8');
-      const tlyric = transPath ? fs.readFileSync(transPath, 'utf8') : '';
+      const lrc = readTextFile(main);
+      const tlyric = transPath ? readTextFile(transPath) : '';
       return { ok: true, lrc, tlyric, romalrc: '', yrc: '', source: 'sidecar' };
     }
 

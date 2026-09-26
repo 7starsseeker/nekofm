@@ -1167,6 +1167,27 @@ class SelfTest {
               detail: `写出 ${files.length} 个文件（${files.join('、')}），读回=${reread.ok}`,
             };
           } },
+
+          /**
+           * 源码级绊线：**读侧车 .lrc 必须走 readTextFile，不得直接按 UTF-8 硬读**。
+           *
+           * 为什么钉它：这类错误**不抛异常**，只把歌词变成"合法但全错"的乱码 ——
+           * 单元测试只看 `ok`/`source` 照样是绿的，只有真去播那首歌才看得见，
+           * 所以极易在重构中悄悄复活。2026-09-27 用户报告"本地文件字幕乱码"，
+           * 实测曲库 131 个 .lrc 里 **105 个是 GBK、2 个是 UTF-16LE**。
+           */
+          { id: 'lrcEncoding', name: '侧车歌词按原编码读，不硬按 UTF-8（源码级绊线）', run: () => {
+            let src = '';
+            try { src = fs.readFileSync(path.join(__dirname, 'sources', 'local.js'), 'utf8'); }
+            catch { return { ok: false, detail: '读不到 main/sources/local.js' }; }
+            const usesHelper = /readTextFile\(main\)/.test(src) && /readTextFile\(transPath\)/.test(src);
+            // 旧写法（会复活这个 bug）：readFileSync(main|transPath, 'utf8')
+            const rawUtf8 = /readFileSync\(\s*(main|transPath|lrcPath|karaokePath)\s*,\s*['"]utf8['"]/.test(src);
+            return {
+              ok: usesHelper && !rawUtf8,
+              detail: `走 readTextFile=${usesHelper}；仍按 utf8 硬读=${rawUtf8}`,
+            };
+          } },
         ],
       },
 

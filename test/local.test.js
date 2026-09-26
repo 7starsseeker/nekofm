@@ -51,6 +51,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const LRC = '[ti:测试歌曲]\n[ar:测试歌手]\n[00:01.00]第一句测试歌词\n[00:03.50]第二句测试歌词\n[00:06.00]第三句测试歌词';
 
+/**
+ * GBK 字节的侧车歌词（Node 没有 GBK 编码器，只能把字节钉成十六进制）。
+ * 为什么非要有这一份素材：曲库里的 .lrc 大多是 2010 年前后 GBK 编码的老文件，
+ * 按 UTF-8 硬读得到的是**合法但全错**的字符串 —— 不抛错，只是满屏乱码。
+ */
+const GBK_LRC = Buffer.from(
+  '5b30303a30312e30305db5dad2bbbee4b2e2cad4b8e8b4ca0d0a'
+  + '5b30303a30332e35305db5dab6febee4b2e2cad4b8e8b4ca0d0a', 'hex');
+const GBK_TRANS = Buffer.from('5b30303a30312e30305db5dad2bbd0d0b7add2eb0d0a', 'hex');
+
 function makeAudio(file, { seconds = 8, meta = {} } = {}) {
   const args = ['-v', 'error', '-y', '-f', 'lavfi', '-i', `sine=frequency=440:duration=${seconds}`,
     '-c:a', 'libmp3lame', '-b:a', '128k'];
@@ -70,16 +80,20 @@ function makeAudio(file, { seconds = 8, meta = {} } = {}) {
   const f1 = path.join(DIR, '带侧车歌词.mp3');
   const f2 = path.join(DIR, 'sub', '内嵌歌词.mp3');
   const f3 = path.join(DIR, '孤勇者.mp3'); // 无歌词 → 应回落到网易云匹配
+  const f4 = path.join(DIR, 'GBK歌词.mp3'); // 侧车是 GBK 字节（老文件）→ 不能读成乱码
   makeAudio(f1, { meta: { title: '带侧车歌词', artist: '测试歌手' } });
   makeAudio(f2, { meta: { title: '内嵌歌词', artist: '测试歌手', lyrics: '内嵌第一句\n内嵌第二句' } });
   makeAudio(f3, { meta: { title: '孤勇者', artist: '陈奕迅' } });
+  makeAudio(f4, { meta: { title: 'GBK歌词', artist: '测试歌手' } });
   fs.writeFileSync(path.join(DIR, '带侧车歌词.lrc'), LRC, 'utf8');
   fs.writeFileSync(path.join(DIR, '带侧车歌词.trans.lrc'), '[00:01.00]First line\n[00:03.50]Second line', 'utf8');
+  fs.writeFileSync(path.join(DIR, 'GBK歌词.lrc'), GBK_LRC);          // 原始字节，故意不转码
+  fs.writeFileSync(path.join(DIR, 'GBK歌词.trans.lrc'), GBK_TRANS);
 
   console.log('== 1) 扫描与元数据 ==');
   const lib = new LocalLibrary({ dirs: [DIR], log: () => {} });
   const tracks = await lib.scan();
-  ok('递归扫到 3 个音频（含子目录）', tracks.length === 3, `${tracks.length} 首`);
+  ok('递归扫到 4 个音频（含子目录）', tracks.length === 4, `${tracks.length} 首`);
   const t1 = tracks.find((t) => t.name === '带侧车歌词');
   ok('读到 ffprobe 标题/艺术家', !!t1 && t1.artistText === '测试歌手', t1 && t1.artistText);
   ok('读到时长', !!t1 && t1.duration > 7 && t1.duration < 9, t1 && t1.duration.toFixed(2) + 's');
@@ -94,6 +108,12 @@ function makeAudio(file, { seconds = 8, meta = {} } = {}) {
   ok('内嵌 lyrics 标签可读', ly2.ok && ly2.source === 'embedded' && ly2.lrc.includes('内嵌第一句'), '来源=' + ly2.source + ' 内容=' + JSON.stringify(ly2.lrc.slice(0, 20)));
   const ly3 = await lib.lyrics(path.join(DIR, '孤勇者.mp3'));
   ok('无歌词时如实返回 none', !ly3.ok && ly3.source === 'none');
+  // 2026-09-27 用户报告的症状就长这样：GBK 侧车被按 UTF-8 硬读 → 满屏乱码。
+  // 注意断言的是**正文**，因为这种错误不会抛异常，只看 ok/source 照样是绿的。
+  const ly4 = await lib.lyrics(f4);
+  ok('GBK 侧车歌词不再乱码', ly4.ok && ly4.source === 'sidecar' && ly4.lrc.includes('第一句测试歌词'),
+    '正文=' + JSON.stringify(String(ly4.lrc).slice(0, 20)));
+  ok('GBK 翻译侧车同样能读', ly4.tlyric.includes('第一行翻译'), JSON.stringify(String(ly4.tlyric).slice(0, 16)));
 
   console.log('\n== 3) 引擎：本地曲目 → 流 → 歌词 → 拖动 ==');
   const cfg = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
@@ -120,7 +140,7 @@ function makeAudio(file, { seconds = 8, meta = {} } = {}) {
   const port = await server.start();
   engine.serverBase = `http://127.0.0.1:${port}`;
   await engine.init();
-  ok('引擎启动时自动索引本地曲库', engine.local.tracks.length === 3, `${engine.local.tracks.length} 首`);
+  ok('引擎启动时自动索引本地曲库', engine.local.tracks.length === 4, `${engine.local.tracks.length} 首`);
 
   const r = await engine.orderByKeyword('侧车', 'local', { uid: '1', uname: '测试', isAnchor: true });
   ok('点本地歌入队', r.ok, r.ok ? 'ok' : r.msg);
