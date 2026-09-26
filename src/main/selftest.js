@@ -1143,10 +1143,31 @@ class SelfTest {
             };
           } },
           { id: 'batTargets', name: '批处理调用的 Node 入口都存在', run: () => {
+            /**
+             * **动态从 .bat 里提取入口**，不再硬编码清单。
+             *
+             * 踩过的坑：原清单里写了 `tools/cleanup-c-drive.js` —— 那是**作者本机的
+             * 清理脚本，故意不入库**（见 .gitignore）。于是 CI 上仓库里根本没有这两个
+             * 文件，检查就报"缺少 tools/cleanup-c-drive.js"，把绿色构建判红。
+             *
+             * 现在的口径：**仓库里存在的 .bat 引用的入口必须存在**；不存在的 .bat 不管。
+             * 这样本机（有 cleanup 脚本）与干净检出（没有）都能正确判定。
+             */
             const root = configPath().appRoot;
-            const need = ['tools/start.js', 'tools/headless.js', 'tools/cleanup-c-drive.js', 'tools/deploy.js'];
+            const bats = fs.readdirSync(root).filter((f) => /\.bat$/i.test(f));
+            const need = [];
+            for (const b of bats) {
+              const txt = fs.readFileSync(path.join(root, b), 'utf8');
+              for (const m of txt.matchAll(/node\s+"?([\w./\\-]+\.js)"?/g)) {
+                const rel = m[1].replace(/\\/g, '/');
+                if (!need.includes(rel)) need.push(rel);
+              }
+            }
             const miss = need.filter((f) => !fs.existsSync(path.join(root, f)));
-            return { ok: miss.length === 0, detail: miss.length ? '缺少 ' + miss.join(', ') : `${need.length} 个入口齐全` };
+            const detail = miss.length
+              ? '缺少 ' + miss.join(', ')
+              : `${bats.length} 个 .bat 共引用 ${need.length} 个入口，全部就位（${need.join('、')}）`;
+            return { ok: miss.length === 0 && need.length > 0, detail };
           } },
           { id: 'launcher', name: '启动器自检可运行（不拉 GUI）', run: () => {
             // 启动器本身也要能被测试：--check-only 只做环境检查，

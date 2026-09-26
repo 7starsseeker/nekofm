@@ -38,31 +38,47 @@ const electronBin = process.platform === 'win32'
   ? path.join(electronDir, 'dist', 'electron.exe')
   : path.join(electronDir, 'dist', 'electron');
 
+/**
+ * `--check-only` 是**只读**模式（给自动测试与排查环境用）。
+ *
+ * 关键：它**绝不能触发依赖安装**。曾经这里没区分，缺 Electron 时一律去跑
+ * `npm install`（首次约 100MB）—— 于是"检查一下环境"变成"下载一百兆"，
+ * CI 上直接超时，本地也悄悄改了磁盘。只读模式就该只读。
+ */
+const CHECK_ONLY = process.argv.includes('--check-only');
+
 if (!fs.existsSync(electronBin)) {
-  line('未检测到 Electron，正在安装依赖（首次约 100MB，请耐心等待）…');
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const r = spawnSync(npm, ['install', '--no-audit', '--no-fund'], { cwd: ROOT, stdio: 'inherit', shell: process.platform === 'win32' });
-  if (r.status !== 0 || !fs.existsSync(electronBin)) {
-    line();
-    line('[错误] 依赖安装失败或 Electron 未就位。');
-    line('       可以改用降级模式（不装 Electron，用浏览器当播放核心）：');
-    line('         node tools\\headless.js');
-    line('       然后浏览器打开 http://127.0.0.1:37821/player');
-    process.exit(1);
+  if (CHECK_ONLY) {
+    line('Electron  未安装（--check-only 只做检查，不自动安装依赖）');
+    line('          要用界面模式请先 npm install；或用降级模式 node tools\\headless.js');
+  } else {
+    line('未检测到 Electron，正在安装依赖（首次约 100MB，请耐心等待）…');
+    const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const r = spawnSync(npm, ['install', '--no-audit', '--no-fund'], { cwd: ROOT, stdio: 'inherit', shell: process.platform === 'win32' });
+    if (r.status !== 0 || !fs.existsSync(electronBin)) {
+      line();
+      line('[错误] 依赖安装失败或 Electron 未就位。');
+      line('       可以改用降级模式（不装 Electron，用浏览器当播放核心）：');
+      line('         node tools\\headless.js');
+      line('       然后浏览器打开 http://127.0.0.1:37821/player');
+      process.exit(1);
+    }
   }
 }
-line('Electron  ✓');
+if (fs.existsSync(electronBin)) line('Electron  ✓');
 
 // 3) 数据目录（跟着程序走，不写系统盘用户目录）
 const dataDir = process.env.NEKOFM_DATA || path.join(ROOT, 'data');
 line(`数据目录  ${dataDir}`);
 
 // 4) 启动（--check-only 只做环境自检，不拉起 GUI —— 便于自动测试启动器本身）
-if (process.argv.includes('--check-only')) {
+if (CHECK_ONLY) {
   line();
   line('环境自检通过（--check-only：不启动界面）。');
   line('  降级模式：node tools\\headless.js');
-  line(`  界面模式：${electronBin} .`);
+  // Electron 没装就别印"界面模式"了 —— 那个可执行文件根本不存在，只会让人白试
+  if (fs.existsSync(electronBin)) line(`  界面模式：${electronBin} .`);
+  else line('  界面模式：需要先 npm install（当前未安装 Electron）');
   process.exit(0);
 }
 
