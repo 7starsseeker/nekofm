@@ -262,6 +262,15 @@ npm run pack:release   :: 出发布包用：打包 + 打干净 zip（不含 data
 > **其实你的东西一点没动**，只是绿色版去读新空目录了。
 > 恢复：删掉那份新建的空 `data`（或改名挪走），再跑 `npm run link-data`。
 >
+> ⚠️ **打包前先关掉正在运行的绿色版。** `electron-builder` 是"先清空、再解包"，
+> 文件被运行中的 exe 占住时它会**清掉一半就报错退出**（实测：`Access is denied` 之后
+> `chrome_*.pak` 两个文件已经没了）—— 运行中的进程靠内存还能跑，
+> 但那份绿色版下次启动就可能起不来。
+> 判断有没有在跑：`Get-Process NekoFM | Select Path`（别用 `tasklist | grep` ——
+> 中文控制台输出编码会骗你，实测给出过"没在跑"的假结果）。
+> 补救：临时输出目录重建一份（`npx electron-builder --win --dir --config.directories.output=D:/tmp/nekofm`），
+> 再把缺的文件拷回来，最后 `npm run link-data`。
+>
 > 发布 zip **必须**是干净的（不含 `data/`），所以它是在建联接**之前**打的 ——
 > `tools/make-release-zip.js` 会主动跳过一切重解析点（联接/符号链接），
 > 并在包成后自检「包内无 `data/`、无 `config.json`、无 `Cookies`」，命中就直接中止。
