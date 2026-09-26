@@ -516,6 +516,23 @@ class SelfTest {
             const rs = await Promise.all(['/', '/overlay', '/player', '/shared/lyric-sync.js'].map((p) => fetch(base + p)));
             return { ok: rs.every((r) => r.status === 200), detail: rs.map((r) => r.status).join('/') };
           } },
+          { id: 'logsPage', name: '运行日志窗口（页面 + 日志接口）', run: async () => {
+            /**
+             * 打包成 exe 后没有控制台，这个窗口是用户唯一能自查的地方
+             * （见 src/main/logbus.js）。所以页面和接口都得在这儿把住：
+             * 页面 404 / 接口拿不到行，用户出问题时就是"两眼一抹黑"。
+             */
+            const page = await fetch(base + '/logs');
+            const html = await page.text();
+            const r = await (await fetch(base + '/api/logs?limit=5')).json();
+            const hasNodes = ['id="lines"', 'id="status"', 'logs.js'].every((n) => html.includes(n));
+            const okAll = page.status === 200 && hasNodes && r.ok === true && Array.isArray(r.lines);
+            return {
+              ok: okAll,
+              detail: `页面 ${page.status}${hasNodes ? '' : '（缺关键节点）'} · 日志接口 ${r.ok ? 'ok' : '失败'}`
+                + (Array.isArray(r.lines) ? ` / 缓冲 ${r.lines.length} 条（seq ${r.seq}）` : ''),
+            };
+          } },
           { id: 'overlayDom', name: '叠加层含歌词与信息栏节点', run: async () => {
             const html = await (await fetch(base + '/overlay')).text();
             const need = ['id="stage"', 'id="lines"', 'id="infoBar"', 'id="ibName"', 'id="ibBar"', 'id="ibRequester"', 'id="ibUpNext"', 'lyric-sync.js'];

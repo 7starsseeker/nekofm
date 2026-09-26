@@ -221,10 +221,26 @@ class NeteaseBrowserFallback {
     };
   }
 
-  /** 借浏览器取歌单详情 */
-  async playlist(id, { limit = 200 } = {}) {
-    const q = new URLSearchParams({ id: String(id), n: String(Math.min(500, limit || 500)), s: '8' }).toString();
-    const r = await this.browserFetch(`/api/v6/playlist/detail?${q}`);
+  /**
+   * 借浏览器取歌单详情。
+   *
+   * `n` 是**返回曲目数上限**，不传时网易云只给 10 首（"导入 100+ 首只进来 10 首"
+   * 的直接原因），所以这里一律显式传大值。上限取 1000；再大的歌单由
+   * `NeteaseClient.playlist()` 用 `trackIds` + songDetail 补齐（v6 的 offset 是**假参数**，
+   * 服务端会忽略，别指望翻页）。
+   *
+   * `trackIds` 必须回传：它是唯一不受 `n` 限制的全量索引，补曲目全靠它。
+   *
+   * 超时也放宽：大歌单的 JSON 有几百 KB，默认 8s 页面超时在慢机器上容易误判失败
+   * （失败一次就会退到直连，白绕一圈）。
+   */
+  async playlist(id, { limit = 0 } = {}) {
+    const n = Math.min(1000, limit || 1000);
+    const q = new URLSearchParams({ id: String(id), n: String(n), s: '8' }).toString();
+    const r = await this.browserFetch(`/api/v6/playlist/detail?${q}`, {
+      timeoutMs: 20000,
+      executeTimeoutMs: 25000,
+    });
     if (!r || !r.ok) return { ok: false, code: -1, msg: '页面取歌单失败：' + (r && r.error), tracks: [] };
     if (!r.json) return { ok: false, code: -1, msg: '页面返回非 JSON', tracks: [] };
     const pl = (r.json.playlist || {});
@@ -232,6 +248,8 @@ class NeteaseBrowserFallback {
       ok: true, code: r.json.code, id: pl.id, name: pl.name,
       cover: pl.coverImgUrl, trackCount: pl.trackCount,
       tracks: (pl.tracks || []).map(this._normSong).filter(Boolean),
+      /** 全量曲目 ID（不受 n 限制）—— 上层按它补齐被 n 截掉的部分 */
+      trackIds: (pl.trackIds || []).map((x) => x && x.id).filter(Boolean),
     };
   }
 

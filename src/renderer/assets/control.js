@@ -113,9 +113,18 @@
       const suffix = ls === 1 ? '' : (ls === 2 ? '（轮播·不收弹幕）' : (ls == null ? '' : '（未开播·不收弹幕）'));
       const via = s.room.via;
       const viaShort = via === 'openlive' ? '开放平台' : (via === 'browser' ? '浏览器' : '直连');
+      /**
+       * 把"认出主播是谁"写进 tooltip。
+       * 用户反馈过"我本身就是主播，打指令却说我没权限" —— 有这个就能一眼看出
+       * 是"没认出主播"还是"认成了别人"，不用翻日志。
+       */
+      const anchor = s.room.anchor || {};
+      const anchorTxt = anchor.uid
+        ? `已认出主播：${anchor.name || '(昵称待首条弹幕)'} · uid ${anchor.uid}`
+        : '还没认到主播 uid（房间信息未返回）—— 主播权限会退化为"仅房管"';
       $('stRoom').textContent = `弹幕 房间 ${s.room.roomId}（${viaShort}）${suffix}`;
       $('stRoom').className = 'pill ' + (ls === 1 ? 'ok' : (ls == null ? 'ok' : ''));
-      $('stRoom').title = ls === 1 ? '' : 'B站只在直播中推送弹幕。未开播/轮播时连接是正常的，但收不到弹幕（发点歌不会触发）；开播后会自动开始收。';
+      $('stRoom').title = (ls === 1 ? '' : 'B站只在直播中推送弹幕。未开播/轮播时连接是正常的，但收不到弹幕（发点歌不会触发）；开播后会自动开始收。') + '\n' + anchorTxt;
 
       /**
        * 通道说明。**房间号输入框的启用/禁用不在这里管** —— 那由通道单选按钮
@@ -339,6 +348,8 @@
       highlightMode(s.player.mode);
       $('btnMute').textContent = s.player.muted ? '🔇' : '🔊';
       $('btnFavorite').textContent = s.favorited ? '★ 已收藏' : '☆ 收藏';
+      // 音量滑块回填（服务端记着的值）—— 不回填的话每次开机都停在 100%
+      syncVolSlider(s.player.volume);
       const badges = [];
       if (s.player.playingIdle) badges.push('闲时歌单');
       if (s.player.cached) badges.push('来自缓存');
@@ -453,6 +464,28 @@
     $('volTxt').textContent = v + '%';
     api({ action: 'setVolume', volume: v / 100 });
   });
+
+  /**
+   * 把音量滑块**回填**成服务端记住的值。
+   *
+   * 2026-09-26 用户反馈："每次启动程序进去音量都是 100%"。
+   * 音量本身其实存住了（`config.player.volume`，实测 0.37），问题在于
+   * 这个滑块**只有 input 事件、没有任何回填** —— 于是每次开机都停在 HTML 里的
+   * 默认 `value="100"`。后果不只是"看着不对"：从"100%"往下拖一点，设进去的是
+   * 0.9x，音量会**突然变响**（用户以为是没记住，其实是拖错基准）。
+   *
+   * 拖动过程中不回填（`activeElement` 判据与播放器页一致），否则 10Hz 的状态广播
+   * 会在手指按着的时候把滑块拽回去。
+   */
+  function syncVolSlider(volume) {
+    if (volume == null) return;
+    const el = $('vol');
+    if (!el || document.activeElement === el) return;
+    const pct = String(Math.round(volume * 100));
+    if (el.value !== pct) el.value = pct;
+    const txt = $('volTxt');
+    if (txt) txt.textContent = pct + '%';
+  }
 
   /** 把服务端返回的失败原因**明确显示出来**（以前失败是完全静默的，用户以为界面坏了） */
   function showOrderFailure(msg) {
@@ -572,27 +605,47 @@
   });
 
   // ---- 歌单导入
-  async function doImportPlaylist(autoQueue) {
+  /**
+   * @param {'saved'|'queue'} mode
+   *   saved（默认）→ 汇入「已保存播放列表」，不打断正在播/正在排的点歌
+   *   queue        → 整单排进当前播放列表
+   */
+  async function doImportPlaylist(mode = 'saved') {
     const input = $('plInput').value.trim();
     if (!input) return;
     const limit = Number($('plLimit').value) || 0;
-    log('info', autoQueue ? '导入并整单入队中…' : '导入中…');
-    const r = await api({ action: 'playlistImport', input, limit, autoQueue, filterBlacklist: true });
+    const toQueue = mode === 'queue';
+    log('info', toQueue ? '导入并整单排进当前队列中…' : '导入到「已保存播放列表」中…');
+    const r = await api({
+      action: 'playlistImport', input, limit,
+      toSaved: !toQueue, autoQueue: toQueue, filterBlacklist: true,
+    });
     const res = r.result || {};
     if (!res.ok) { log('error', '导入失败：' + (res.msg || r.error || '未知')); return; }
     const p = res.playlist || {};
-    let msg = `《${p.name}》已导入 ${p.fetched} 首（歌单共 ${p.trackCount} 首）`;
+    let msg = `《${p.name}》已取到 ${p.fetched} 首（歌单共 ${p.trackCount} 首）`;
+    // 网易云只给了一部分（多半是没登录）——必须说清，否则用户只会看到"怎么才几首"
+    if (res.truncated) msg += '　⚠️ 网易云没给全，登录网易云后可重导';
     if (res.blockedCount) {
       msg += `；黑名单拦下 ${res.blockedCount} 首` + (res.blockedPreview && res.blockedPreview.length
         ? '：' + res.blockedPreview.map((b) => b.name).join(' / ') : '');
     }
-    if (autoQueue) msg += `；已入队 ${res.queued} 首`;
-    log('info', msg);
+    if (!toQueue) msg += `；已加入已保存播放列表 ${res.savedAdded} 首${res.savedDup ? `（跳过重复 ${res.savedDup} 首）` : ''}`;
+    else msg += `；已排进当前队列 ${res.queued} 首`;
+    log(res.truncated ? 'warn' : 'info', msg);
+    if (!toQueue) refreshSavedList();
   }
-  on('btnPlImport', 'click', () => doImportPlaylist(false));
-  on('btnPlImportQueue', 'click', () => doImportPlaylist(true));
-  on('plInput', 'keydown', (e) => { if (e.key === 'Enter') doImportPlaylist(false); });
+  on('btnPlImport', 'click', () => doImportPlaylist('saved'));
+  on('btnPlImportQueue', 'click', () => doImportPlaylist('queue'));
+  on('plInput', 'keydown', (e) => { if (e.key === 'Enter') doImportPlaylist('saved'); });
 
+  /**
+   * 「我的歌单」列表：每个歌单两个动作。
+   *
+   * 2026-09-26 改：原来只有一个「入队」按钮，而且**硬编码 limit 50** ——
+   * 100+ 首的歌单点一下就只进 50 首（再叠上服务端只给 10 首的老问题，体感就是"丢了"）。
+   * 现在两个按钮都取全量（limit 0），默认入口是「加入已保存」。
+   */
   on('btnMyPl', 'click', async () => {
     const box = $('plList');
     box.innerHTML = '<div class="tip">读取中…</div>';
@@ -603,10 +656,29 @@
     list.slice(0, 50).forEach((p) => {
       const d = document.createElement('div');
       d.innerHTML = `<span>${escapeHtml(p.name)}</span> <span class="tip">${p.trackCount} 首</span> `;
-      const b = document.createElement('button');
-      b.textContent = '入队';
-      b.onclick = () => api({ action: 'neteaseLoadPlaylist', id: p.id, limit: 50 });
-      d.appendChild(b);
+      const add = document.createElement('button');
+      add.textContent = '加入已保存';
+      add.title = `把《${p.name}》整张加入「已保存播放列表」（取全量，不打断点歌）`;
+      add.onclick = async () => {
+        const rr = await api({ action: 'playlistImport', input: String(p.id), limit: 0, toSaved: true });
+        const d2 = rr.result || {};
+        if (d2.ok) {
+          log('info', `《${(d2.playlist || {}).name || p.name}》已加入已保存播放列表 ${d2.savedAdded} 首` +
+            (d2.savedDup ? `（跳过重复 ${d2.savedDup} 首）` : '') + (d2.truncated ? '　⚠️ 网易云没给全' : ''));
+          refreshSavedList();
+        } else log('error', d2.msg || '加入失败');
+      };
+      const q = document.createElement('button');
+      q.textContent = '排进队列';
+      q.title = `把《${p.name}》整张排进当前播放列表（取全量）`;
+      q.onclick = async () => {
+        const rr = await api({ action: 'playlistImport', input: String(p.id), limit: 0, autoQueue: true, toSaved: false });
+        const d2 = rr.result || {};
+        if (d2.ok) log('info', `《${(d2.playlist || {}).name || p.name}》已排进当前队列 ${d2.queued} 首${d2.truncated ? '　⚠️ 网易云没给全' : ''}`);
+        else log('error', d2.msg || '入队失败');
+      };
+      d.appendChild(add);
+      d.appendChild(q);
       box.appendChild(d);
     });
   });
@@ -1178,6 +1250,31 @@
     const r = await api({ action: 'setOverlay', overlay: { infoBar: collectInfoBar() } });
     if (r.ok) log('info', '信息栏设置已应用（立即生效）');
   });
+
+  /**
+   * **信息栏的每个控件改完就即时生效**（2026-09-26 加）。
+   *
+   * 起因（用户反馈）："信息卡片好像不像歌词那样能修改选项之后实时更新"。
+   * 这里原来是"改完必须点「应用并保存」" —— 而歌词那边的主题下拉是改一下就变，
+   * 于是对比之下信息卡片显得"改了没反应"。现在两边一致：**改一下立刻生效**，
+   * 「应用并保存」按钮保留（把当前所有勾选一次性落盘，行为不变）。
+   *
+   * 为什么监听 `change` 而不是 `input`：滑杆的 `input` 在拖动过程中会连发几十次，
+   * 每次 `setOverlay` 都要 `saveConfig` 落盘 —— 那是几十次磁盘写。
+   * `change` 只在松手（或勾选框/下拉变化）时发一次，正好一次拖拽一次落盘。
+   */
+  const INFO_BAR_IDS = [
+    'ibEnabled', 'ibPos', 'ibTheme', 'ibScale', 'ibOpacity', 'ibCoverSize', 'ibAccent',
+    'ibCover', 'ibRequester', 'ibSource', 'ibProgress', 'ibTime', 'ibUpNext', 'ibBiliStats', 'ibHideIdle',
+  ];
+  INFO_BAR_IDS.forEach((id) => {
+    const e = $(id);
+    if (!e) return;
+    e.addEventListener('change', async () => {
+      const r = await api({ action: 'setOverlay', overlay: { infoBar: collectInfoBar() } });
+      if (!r.ok) log('error', '信息栏设置应用失败：' + ((r.result && r.result.msg) || r.error || '未知'));
+    });
+  });
   ['ibScale', 'ibOpacity', 'ibCoverSize'].forEach((id) => {
     const e = $(id);
     if (e) e.addEventListener('input', () => {
@@ -1287,16 +1384,34 @@
     if (e) e.addEventListener('change', () => { /* 改动由「保存」按钮提交 */ });
   });
 
-  // 从各来源整批加入「已保存播放列表」——一视同仁
+  /**
+   * 刷新「已保存播放列表」。
+   *
+   * **必须走 window 钩子**：control.js 按功能拆成了几个 IIFE，`refreshSaved`
+   * 定义在后面那个 IIFE 里 —— 这里直接写 `refreshSaved()` 是 ReferenceError
+   * （「我的收藏」/「本地曲库」按钮点了只记日志、列表不刷新，就是踩了这个）。
+   * 页面加载后钩子已就绪，用户点击时必定可用。
+   */
+  const refreshSavedList = () => {
+    if (window.__nekofmRefreshLists) window.__nekofmRefreshLists();
+    else if (window.__nekofmSyncSaved) window.__nekofmSyncSaved();
+  };
+
+  /**
+   * 从各来源整批加入「已保存播放列表」——一视同仁。
+   *
+   * 「已导入歌单」这个来源按钮 2026-09-26 去掉了：歌单导入现在**默认就直接落进已保存列表**，
+   * 再留一个"从已导入歌单加入"的按钮纯属多余（用户反馈"那几个来源按钮好像没意义了"）。
+   * 收藏 / 本地曲库这两个来源与歌单无关，仍然保留。
+   */
   const pullFrom = async (source, label) => {
     const r = await api({ action: 'savedPullFrom', source });
     const d = r.result || {};
-    if (d.ok) { log('info', `已从「${label}」加入 ${d.added} 首${d.dup ? `（跳过重复 ${d.dup} 首）` : ''}，已保存共 ${d.count} 首`); refreshSaved(); }
+    if (d.ok) { log('info', `已从「${label}」加入 ${d.added} 首${d.dup ? `（跳过重复 ${d.dup} 首）` : ''}，已保存共 ${d.count} 首`); refreshSavedList(); }
     else log('error', d.msg || `从「${label}」加入失败`);
   };
   on('btnSavedFromFav', 'click', () => pullFrom('favorites', '我的收藏'));
   on('btnSavedFromLocal', 'click', () => pullFrom('local', '本地曲库'));
-  on('btnSavedFromPl', 'click', () => pullFrom('playlist', '已导入歌单'));
 
   // ------------------------------------------------------------------ 媒体缓存
   /** 摘要（随状态广播刷新，很轻） */
@@ -1314,15 +1429,37 @@
   }
 
   /** 详细列表（含最近缓存条目 + 逐条删除），按需拉取 */
-  async function refreshCacheList() {
+  /**
+   * 缓存条目列表一次最多渲染多少行。
+   *
+   * 缓存条目可以到几千条（每行带一个删除按钮），一次性铺满 DOM 没必要；
+   * 超过就只渲染前 N 条 + 一个「显示全部」按钮。
+   * 注意这**不是**后端限制：数据是完整的，只是默认不一次画出来。
+   */
+  const CACHE_RENDER_MAX = 300;
+
+  /**
+   * 刷新缓存列表。
+   *
+   * 2026-09-26 修：旧实现取 `stats().recent`（服务端只截 10 条）再 `slice(0, 12)`，
+   * 两处上限叠起来 —— 55 条缓存只显示 10 条，用户反馈"显示的项目不全"。
+   * 现在摘要走 `cacheStats`、明细走 `cacheList`（全量）。
+   *
+   * @param {boolean} showAll 是否铺开全部行（点「显示全部」后为 true）
+   */
+  async function refreshCacheList(showAll = false) {
     const r = await api({ action: 'cacheStats' });
     const st = r.result;
     if (!st) return;
     fillCacheSummary({ enabled: st.enabled, count: st.count, mb: Number(((st.bytes || 0) / 1048576).toFixed(1)), maxMB: Math.round((st.maxBytes || 0) / 1048576) });
+
+    const lr = await api({ action: 'cacheList' });
+    const all = (lr.result && lr.result.items) || [];
     const ul = $('cacheList');
     ul.innerHTML = '';
-    const items = (st.recent || []).slice(0, 12);
-    items.forEach((m) => {
+    const shown = all.slice(0, showAll ? all.length : CACHE_RENDER_MAX);
+
+    shown.forEach((m) => {
       const li = document.createElement('li');
       li.innerHTML = `<span class="nm">${escapeHtml(m.name || m.key)}</span>`
         + `<span class="by">${escapeHtml(m.artist || '')}</span>`
@@ -1335,14 +1472,31 @@
         const d = (rr && rr.result) || {};
         log(d.audio || d.lyrics ? 'info' : 'error',
           d.audio || d.lyrics ? `已删除（音频 ${d.audio} · 歌词 ${d.lyrics}）` : '删除失败');
-        refreshCacheList();
+        refreshCacheList(showAll);
       };
       li.appendChild(del);
       ul.appendChild(li);
     });
-    if (!items.length) {
+
+    if (!all.length) {
       const li = document.createElement('li');
       li.innerHTML = '<span class="tip">还没有缓存条目</span>';
+      ul.appendChild(li);
+    }
+    const info = $('cacheListInfo');
+    if (info) {
+      info.textContent = all.length
+        ? `缓存了 ${all.length} 条（按缓存时间倒序）`
+          + (shown.length < all.length ? `，下面先列最近 ${shown.length} 条` : '')
+        : '';
+    }
+    // 条数很多时给一个手动铺开的入口
+    if (shown.length < all.length) {
+      const li = document.createElement('li');
+      const more = document.createElement('button');
+      more.textContent = `显示全部（还有 ${all.length - shown.length} 条）`;
+      more.onclick = () => refreshCacheList(true);
+      li.appendChild(more);
       ul.appendChild(li);
     }
   }

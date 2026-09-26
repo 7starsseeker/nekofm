@@ -517,47 +517,118 @@ class NeteaseClient {
   }
 
   /**
-   * 歌单详情。老版一次最多给 200 首；超过则用 v6 分页补齐。
+   * 歌单详情。**目标是拿到全量曲目**，但网易云这边有三个坑（2026-09-26 逐一实测）：
+   *
+   *   1) v6 端点的 `n` 是「返回曲目数上限」，**不传时只给 10 首** ——
+   *      用户导入 100+ 首的歌单却只进来 10 首，就是撞上这个默认值（而且 v6 只有 10 首时
+   *      `trackCount` 报的仍是真实值，旧接口更狠：连 `trackCount` 都谎报成 10，
+   *      上层完全看不出被截断）。
+   *   2) `n` 也不是调大就万事大吉：`n=500` 对 617 首的歌单会**硬截到 500 首**。
+   *   3) `offset` 参数被服务端**忽略**（`n=500&offset=100` 依然从头返回 200 首），
+   *      所以旧实现那段"v6 翻页补齐"是假的 —— 它只会把前 500 首重复拼进队列。
+   *
+   * 于是改成：**先要一份尽量全的 tracks，再用不受 `n` 限制的 `trackIds` 校验，
+   * 缺的那部分按 id 走 songDetail 补齐**。实测 `trackIds` 在 `n=500`（甚至不传 n）时
+   * 依然返回全部 617 个 —— 它是唯一可靠的"全量索引"。
    */
   async playlist(id, { limit = 0 } = {}) {
+    let got = null;   // { id, name, cover, trackCount, tracks, trackIds }
     /**
-     * 主路径（2026-09-26 上线）：浏览器通道优先（一次拿 500 首，避免分页）。
-     * 兜底：直连老版 `/api/playlist/detail`（200 上限） + v6 分页补齐。
+     * 主路径：浏览器通道。它带真 session，登录后普通歌单也能拿到全量。
+     * 但**匿名时 v6 对普通歌单只给 10 首**（官方榜单倒是给全），所以不能只靠它 ——
+     * 下面的 `_fillTracks` 会用 trackIds 把缺的补回来。
      */
     if (this.browser && this.browser.available) {
       try {
         const r = await this._raceAbort(this.browser.playlist(id, { limit }));
-        if (r && r.ok && r.tracks && r.tracks.length) {
-          const tracks = limit ? r.tracks.slice(0, limit) : r.tracks;
-          return { ok: true, id: r.id, name: r.name, cover: r.cover, trackCount: r.trackCount, tracks };
-        }
+        if (r && r.ok && r.tracks && r.tracks.length) got = r;
+        else this.log(`[netease] 浏览器 playlist 没拿到曲目，回退直连：${(r && r.msg) || '未知'}`);
       } catch (e) { this.log('[netease] 浏览器 playlist 失败，回退直连：' + e.message); }
     }
-    const r = await this._fetch(`${BASE}/api/playlist/detail?id=${id}`);
-    if (!r.ok || !r.data.result) return { ok: false, code: r.code, msg: r.msg, tracks: [] };
-    const res = r.data.result;
-    let tracks = (res.tracks || []).map((t) => this._normSong(t)).filter(Boolean);
-    const total = res.trackCount || tracks.length;
-
-    if ((limit && tracks.length < Math.min(limit, total)) || tracks.length < total) {
-      const want = limit ? Math.min(limit, total) : total;
-      const more = [];
-      for (let offset = tracks.length; offset < want; offset += 500) {
-        const p = await this._fetch(`${BASE}/api/v6/playlist/detail?${this._qs({ id, n: Math.min(500, want - offset), s: 8, offset })}`);
-        const got = (p.data && p.data.playlist && p.data.playlist.tracks) || [];
-        more.push(...got.map((t) => this._normSong(t)));
-        if (!got.length) break;
-      }
-      if (more.length) tracks = tracks.concat(more);
+    // 兜底：直连老版 /api/playlist/detail（登录态一次给全量；匿名时同样只有 10 首）
+    if (!got) {
+      const r = await this._fetch(`${BASE}/api/playlist/detail?id=${id}`);
+      if (!r.ok || !r.data.result) return { ok: false, code: r.code, msg: r.msg, tracks: [] };
+      const res = r.data.result;
+      got = {
+        id: res.id,
+        name: res.name,
+        cover: res.coverImgUrl,
+        trackCount: res.trackCount,
+        tracks: (res.tracks || []).map((t) => this._normSong(t)).filter(Boolean),
+        trackIds: (res.trackIds || []).map((x) => x && x.id).filter(Boolean),
+      };
     }
+
+    const ids = got.trackIds || [];
+    /**
+     * 真实总数取三者的**最大值**。
+     *
+     * 不能只用 `trackCount`：匿名访问普通歌单时，老接口会把 trackCount 也谎报成 10
+     * （连"被截了"都看不出来），而 `trackIds` 是完整的 617 —— 只信 trackCount 就补不动。
+     * 也不只用 trackIds：万一某个接口没回 trackIds，trackCount 仍是有效信息。
+     */
+    const total = Math.max(got.trackCount || 0, ids.length, got.tracks.length);
+    const want = limit ? Math.min(limit, total) : total;
+    const tracks = await this._fillTracks(got, want);
+
     return {
       ok: true,
-      id: res.id,
-      name: res.name,
-      cover: res.coverImgUrl,
+      id: got.id,
+      name: got.name,
+      cover: got.cover,
       trackCount: total,
+      fetched: tracks.length,
+      /** 拿到手的比歌单实际少 → 上层要提示用户（并说清多半是没登录） */
+      truncated: tracks.length < total,
       tracks: limit ? tracks.slice(0, limit) : tracks,
     };
+  }
+
+  /**
+   * 按 `trackIds` 的顺序把曲目补齐到 `want` 首。
+   *
+   * 为什么不用 offset 翻页：见 `playlist()` 的注释第 3 条 —— 服务端忽略 offset。
+   * 这里改用 songDetail 按 id 单点补齐（每批 100 首，实测 100/100 稳定返回，
+   * 拉到 200+ 会被服务端截断），最后按 trackIds 原始顺序重排
+   * （songDetail 的返回顺序**不保证**与请求一致，不重排的话歌单顺序会乱）。
+   *
+   * 补不齐就返回现有的 —— 宁可少几首，也不要像旧实现那样拼进重复项。
+   */
+  async _fillTracks({ tracks = [], trackIds = [] }, want = 0) {
+    const ids = (trackIds || [])
+      .filter((x) => x != null)
+      .map(String)
+      .slice(0, want > 0 ? want : undefined);
+    if (!ids.length) return (tracks || []).slice(0, want > 0 ? want : undefined);
+
+    const byId = new Map();
+    for (const t of tracks || []) if (t && t.id != null) byId.set(String(t.id), t);
+
+    const batchSize = 100;
+    const missing = ids.filter((i) => !byId.has(i));
+    for (let i = 0; i < missing.length; i += batchSize) {
+      const batch = missing.slice(i, i + batchSize);
+      let d = null;
+      try {
+        d = await this.songDetail(batch);
+      } catch (e) {
+        this.log('[netease] 补齐歌单曲目异常：' + e.message);
+      }
+      const batchSongs = (d && d.ok && d.songs) || [];
+      for (const s of batchSongs) if (s && s.id != null) byId.set(String(s.id), s);
+      if (!batchSongs.length) {
+        this.log(`[netease] 补齐歌单曲目中断（已补 ${i}/${missing.length} 首）`);
+        break;
+      }
+    }
+
+    const out = [];
+    for (const i of ids) {
+      const t = byId.get(i);
+      if (t) out.push(t);
+    }
+    return out;
   }
 
   /** 我的歌单（需登录，eapi） */

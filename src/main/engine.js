@@ -133,6 +133,14 @@ class Engine extends EventEmitter {
     });
 
     this.danmaku = null;
+    /**
+     * 主播身份（房间房主）—— 判定"主播特权"用。
+     * uid 来自房间信息（三个通道都会给：room_init / 开放平台 anchor.uid），
+     * 昵称由主播的第一条弹幕补上（房间信息里没有昵称），用于 uid 对不上时的兜底。
+     * 详见 `_isAnchorUser`。
+     */
+    this.anchorUid = 0;
+    this.anchorName = '';
 
     // 在线媒体缓存：在线放过的歌落盘，下次直接读本地
     this.cache = new MediaCache({
@@ -391,6 +399,15 @@ class Engine extends EventEmitter {
      */
     dc.on('room', (info) => {
       this.roomLiveStatus = info.liveStatus;
+      /**
+       * 记下**主播的 uid**（room_init 的 uid 就是房主）—— 判定"主播特权"要用它。
+       *
+       * 2026-09-26 修：这里以前没接，而 `handleDanmaku` 里早就在用 `this.anchorUid`
+       * 判断 `isAnchor`，那个字段**永远是 undefined** —— 于是主播本人发指令会被回
+       * "该指令需要房管/主播权限"（用户实测："我本身就是主播，但通过直播姬打指令说没有权限"）。
+       * 昵称随后由主播的第一条弹幕补上（见 handleDanmaku），用于 uid 对不上的兜底。
+       */
+      if (info.uid) this.anchorUid = info.uid;
       if (info.liveStatus !== 1) {
         const what = info.liveStatus === 2 ? '正在轮播' : '未开播';
         this.notify('warn', `房间 ${info.roomId} ${what}：弹幕服务已连上，但 B站此刻不会推送弹幕；`
@@ -446,7 +463,15 @@ class Engine extends EventEmitter {
      */
     this._connSeq++;
     if (this._danmakuBridge) { try { this._danmakuBridge.stop(); } catch { /* 忽略 */ } this._danmakuBridge = null; }
-    if (this.danmaku) { this.danmaku.close(); this.danmaku = null; this.roomLiveStatus = null; this.emit('change'); }
+    if (this.danmaku) {
+      this.danmaku.close();
+      this.danmaku = null;
+      this.roomLiveStatus = null;
+      // 主播身份跟着连接走：断开就清掉，免得换房间后还用上一个房间的主播 uid
+      this.anchorUid = 0;
+      this.anchorName = '';
+      this.emit('change');
+    }
   }
 
   /**
@@ -481,11 +506,34 @@ class Engine extends EventEmitter {
     return { ok: true, loggedIn, nick };
   }
 
+  /**
+   * 这条弹幕是不是**主播本人**发的。
+   *
+   * 判据按可靠度排序（2026-09-26 加，起因：主播自己发指令被回"需要房管/主播权限"）：
+   *   1. **uid 相等** —— 房间信息（room_init）里的房主 uid，最权威；
+   *   2. **昵称相等** —— 兜底。实测主播从**直播姬**发的弹幕与从网页发的，
+   *      在服务端看来并不完全一致（用户原话"好像识别成不一样的人了"），
+   *      uid 万一对不上时昵称仍能认出本人。B站昵称唯一，且只有主播自己会拿到这个名字。
+   */
+  _isAnchorUser(d) {
+    if (!this.danmaku || !d) return false;
+    const anchorUid = this.anchorUid;
+    if (anchorUid && d.uid && String(d.uid) === String(anchorUid)) return true;
+    return !!(this.anchorName && d.uname && String(d.uname) === String(this.anchorName));
+  }
+
   /** 弹幕 → 指令 → 动作。所有拒绝原因都会变成一条 notice（可显示在叠加层角标） */
   async handleDanmaku(d) {
+    const isAnchor = this._isAnchorUser(d);
+    /**
+     * 顺手把主播的昵称学下来：房间信息里只有 uid，没有昵称。
+     * 第一条"uid 命中"的弹幕就带昵称，记下来给 `_isAnchorUser` 的第 2 条判据用
+     * （不额外发请求，也不依赖任何需要登录的接口）。
+     */
+    if (isAnchor && d.uname && this.anchorName !== d.uname) this.anchorName = d.uname;
     const user = {
       uid: d.uid, uname: d.uname,
-      isAdmin: d.isAdmin, isAnchor: !!this.danmaku && d.uid === this.anchorUid,
+      isAdmin: d.isAdmin, isAnchor,
     };
     const c = parseCommand(d.text, { words: this.config.commands });
 
@@ -977,10 +1025,16 @@ class Engine extends EventEmitter {
   // ================================================================ 歌单导入
   /**
    * 导入一个网易云歌单（支持 ID / 链接 / 分享短链）。
-   * 流程：解析 ID → 取全量曲目 → **过黑名单** → 记录到 config.playlists.imported。
-   * @param {{input:string, limit?:number, filterBlacklist?:boolean, autoQueue?:boolean}} opts
+   * 流程：解析 ID → 取全量曲目 → **过黑名单** → 汇入「已保存播放列表」
+   * → 记录到 config.playlists.imported。
+   *
+   * 默认**进「已保存播放列表」而不是点播队列**（2026-09-26 用户要求）：
+   * 导入是"备货"，不是"现在就要播"；整单塞进队列会立刻盖掉观众点的歌。
+   * 想直接排进当前队列仍可显式传 `autoQueue: true`。
+   *
+   * @param {{input:string, limit?:number, filterBlacklist?:boolean, toSaved?:boolean, autoQueue?:boolean}} opts
    */
-  async importPlaylist({ input, limit = 0, filterBlacklist = true, autoQueue = false } = {}) {
+  async importPlaylist({ input, limit = 0, filterBlacklist = true, toSaved = true, autoQueue = false } = {}) {
     const parsed = await this.netease.resolvePlaylistId(input);
     if (!parsed.ok) return { ok: false, msg: parsed.msg };
 
@@ -1000,6 +1054,8 @@ class Engine extends EventEmitter {
       cover: pl.cover || '',
       trackCount: pl.trackCount || all.length,
       fetched: all.length,
+      /** 网易云没给全时留个痕（多半是没登录），排查"怎么又只进来几首"时靠它 */
+      truncated: !!pl.truncated,
       importedAt: Date.now(),
       lastQueuedAt: null,
       via: parsed.via,
@@ -1008,10 +1064,28 @@ class Engine extends EventEmitter {
     if (idx >= 0) list[idx] = { ...list[idx], ...rec };
     else list.push(rec);
 
-    this.notify('info', `已导入歌单《${pl.name}》共 ${all.length} 首${blocked.length ? `，其中 ${blocked.length} 首被黑名单拦下` : ''}`);
+    let savedAdded = 0;
+    let savedDup = 0;
+    if (toSaved && kept.length) {
+      const r = this.savedAddMany(kept, { uname: `歌单《${pl.name}》` });
+      savedAdded = r.added;
+      savedDup = r.dup;
+    }
 
     let queued = 0;
     if (autoQueue) queued = this.queueTracks(kept, `歌单《${pl.name}》`);
+
+    /**
+     * 通知里必须说清两件事，否则用户只能看到"怎么才进来几首"：
+     *   · 被网易云截断（fetched < trackCount）—— 通常是没登录网易云
+     *   · 有多少首被黑名单拦下
+     */
+    let msg = `已导入歌单《${pl.name}》共 ${all.length} 首`;
+    if (pl.truncated) msg += `（歌单实际 ${pl.trackCount} 首，网易云只给了 ${all.length} 首 —— 多半是没登录网易云）`;
+    if (blocked.length) msg += `，其中 ${blocked.length} 首被黑名单拦下`;
+    if (toSaved) msg += `；已加入已保存播放列表 ${savedAdded} 首${savedDup ? `（跳过重复 ${savedDup} 首）` : ''}`;
+    if (autoQueue) msg += `；已入队 ${queued} 首`;
+    this.notify(pl.truncated ? 'warn' : 'info', msg);
 
     this.emit('change');
     return {
@@ -1019,6 +1093,9 @@ class Engine extends EventEmitter {
       playlist: { id: rec.id, name: rec.name, cover: rec.cover, trackCount: rec.trackCount, fetched: all.length },
       blockedCount: blocked.length,
       blockedPreview: blocked.slice(0, 5).map((b) => ({ name: b.song.name, why: b.why })),
+      truncated: !!pl.truncated,
+      savedAdded,
+      savedDup,
       queued,
       tracks: kept,
     };
@@ -1045,9 +1122,18 @@ class Engine extends EventEmitter {
     const queued = this.queueTracks(kept, `歌单《${pl.name}》`);
     const list = this.config.playlists.imported || [];
     const rec = list.find((x) => String(x.id) === String(id));
-    if (rec) rec.lastQueuedAt = Date.now();
-    this.notify('info', `《${pl.name}》入队 ${queued}/${all.length} 首${blocked.length ? `（${blocked.length} 首被黑名单拦下）` : ''}`);
-    return { ok: true, name: pl.name, queued, total: all.length, blockedCount: blocked.length };
+    if (rec) {
+      rec.lastQueuedAt = Date.now();
+      rec.fetched = all.length;
+      rec.trackCount = pl.trackCount || rec.trackCount;
+      rec.truncated = !!pl.truncated;
+    }
+    this.notify(pl.truncated ? 'warn' : 'info',
+      `《${pl.name}》入队 ${queued}/${all.length} 首${pl.truncated ? `（歌单实际 ${pl.trackCount} 首 —— 网易云没给全，多半是没登录）` : ''}${blocked.length ? `（${blocked.length} 首被黑名单拦下）` : ''}`);
+    return {
+      ok: true, name: pl.name, queued, total: all.length,
+      blockedCount: blocked.length, truncated: !!pl.truncated,
+    };
   }
 
   removeImportedPlaylist(id) {
@@ -1734,10 +1820,13 @@ class Engine extends EventEmitter {
     } else if (source === 'playlist') {
       const pid = playlistId || (this.config.playlists && this.config.playlists.imported && this.config.playlists.imported[0] && this.config.playlists.imported[0].id);
       if (!pid) return { ok: false, msg: '还没有导入过歌单' };
-      const pl = await this.netease.playlist(pid, { limit: 500 });
+      const pl = await this.netease.playlist(pid, { limit: 0 });
       if (!pl.ok) return { ok: false, msg: pl.msg || '歌单拉取失败' };
       songs = pl.tracks;
       label = pl.name || '已导入歌单';
+      if (pl.truncated) {
+        this.notify('warn', `《${pl.name}》只取到 ${pl.fetched}/${pl.trackCount} 首（多半是没登录网易云）`);
+      }
     } else {
       return { ok: false, msg: '未知来源：' + source };
     }
@@ -3145,6 +3234,12 @@ class Engine extends EventEmitter {
         liveStatus: this.roomLiveStatus,
         via: this.openLive ? 'openlive' : (this._danmakuBridge ? 'browser' : 'direct'),
         stats: this.danmaku.stats,
+        /**
+         * 认到的"主播是谁"—— 只读诊断用。
+         * 用户反馈过"我本身就是主播，但打指令说我没权限"，有这两个字段就能当场看出
+         * 是"没认出来"还是"认到了别人"，不用再去翻日志。
+         */
+        anchor: { uid: this.anchorUid || 0, name: this.anchorName || '' },
       } : null,
       netease: {
         loggedIn: this.netease.isLoggedIn,

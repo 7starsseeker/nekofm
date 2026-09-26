@@ -403,29 +403,56 @@ class MediaCache {
   }
 
   /**
-   * 缓存摘要。**结果被记忆化**，只有内容真的变了才重算 ——
+   * 缓存**摘要**（只有计数与体积，**不含条目列表**）。
+   * 结果被记忆化，只有内容真的变了才重算 ——
    * 它被 10Hz 的状态广播调用，绝不能每次都做同步目录扫描（见 constructor 注释）。
+   *
+   * 想看缓存了哪些曲目请用 `list()`：摘要这里故意不带列表，
+   * 免得 10Hz 广播背上一个几百上千条的数组。
    */
   stats() {
     if (this._statsCache) return this._statsCache;
     this.init();
-    const items = [...this.index.values()].sort((a, b) => (b.at || 0) - (a.at || 0));
     const ls = this.lyricStats();
     this._statsCache = {
       enabled: this.enabled,
-      count: items.length,
+      count: this.index.size,
       bytes: this.totalBytes(),
       maxBytes: this.maxBytes,
       // 歌词缓存与音频缓存同一套生命周期，统计一起给出
       lyricCount: ls.count,
       lyricBytes: ls.bytes,
       dir: this.dir,
-      recent: items.slice(0, 10).map((m) => ({
+    };
+    return this._statsCache;
+  }
+
+  /**
+   * 缓存条目**全量列表**（按缓存时间倒序）。
+   *
+   * 为什么另开一条路、不复用 stats()：
+   *   `stats()` 挂在 **10Hz 的 state 广播**上，只能放摘要；详情页要看"到底缓存了哪些"
+   *   就得有一条按需读取、不受条数限制的路。
+   *   2026-09-26 用户反馈"缓存列表显示的项目不全" —— 旧实现是 `stats()` 里截 10 条
+   *   （`recent`）、前端再 `slice(0,12)`，两处上限叠起来，55 条缓存只看得见 10 条。
+   *
+   * @param {{limit?:number, offset?:number}} [opts] `limit <= 0` 表示不限（默认全量）
+   */
+  list({ limit = 0, offset = 0 } = {}) {
+    this.init();
+    const all = [...this.index.values()].sort((a, b) => (b.at || 0) - (a.at || 0));
+    const off = Math.max(0, Math.floor(Number(offset) || 0));
+    const rest = off ? all.slice(off) : all;
+    const page = limit > 0 ? rest.slice(0, limit) : rest;
+    return {
+      ok: true,
+      total: all.length,
+      offset: off,
+      items: page.map((m) => ({
         key: m.key, name: m.name, artist: m.artist, source: m.source,
         mb: Number(((m.size || 0) / 1048576).toFixed(2)), at: m.at,
       })),
     };
-    return this._statsCache;
   }
 
   /** 缓存目录（要加进流接口白名单，否则缓存文件自己反而播不了） */

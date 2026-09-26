@@ -45,6 +45,100 @@ const BROWSER_CANDIDATES = [
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 把浏览器窗口从**任务栏**抠掉用的小脚本（PowerShell + P/Invoke）。
+ * 里面两个占位符由 `_hideFromTaskbar` 注入：进程号、profile 目录（兜底匹配用）。
+ * ⚠️ 注入必须用 `replaceAll` —— 占位符在脚本里出现两次时，`replace` 只换第一处
+ * （人家第一版就踩了：注释里也写了一遍占位符，结果真脚本里的没被替换，
+ * PowerShell 直接解析报错，表现成"隐藏功能静默失效"）。
+ *
+ * 为什么这么绕：
+ *   · 不用 `--headless` —— 弹幕服务认的是"环境像不像正常用户"，headless 是另一种
+ *     非常规环境，别拿通道可用性去赌（文件头那一天的排查结论）。
+ *   · 也不用 `SW_HIDE` 彻底隐藏窗口 —— 隐藏后 Chromium 认为页面进入 hidden 状态，
+ *     会节流页面内的定时器，而 B站弹幕客户端正是靠页面里的定时器发心跳，有掉线风险。
+ *   · 于是走 **WS_EX_TOOLWINDOW**：工具窗口不进任务栏，但窗口本身依旧"可见"，
+ *     页面行为与现在（挪到屏幕外）**完全一致**，只是任务栏上不再占一格。
+ */
+const HIDE_FROM_TASKBAR_PS = `
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class NekoTaskbar {
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int i, int v);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  /**
+   * 给该进程**所有可见的浏览器顶层窗口**补 WS_EX_TOOLWINDOW，返回改了几个。
+   *
+   * 为什么不是"找第一个就完事"：Chromium 每个进程有好几个窗口，
+   *   · Chrome_WidgetWin_0 是隐藏辅助窗（0x0、IsWindowVisible=false）—— 不用碰；
+   *   · Chrome_WidgetWin_1 是界面窗口，而且**可能不止一个**（实测 Edge 会多开一个
+   *     小窗，位置就在 0,0）。只改第一个有可能改到"没有任务栏按钮的那个"，
+   *     日志写着成功、图标照旧占着一格（人家第一版就这么错的）。
+   * 全都改上最稳：工具窗口只是不进任务栏 / Alt+Tab，其余行为不变。
+   *
+   * ⚠️ 这段在 JS 模板字符串里，注释**不能出现反引号** —— 会提前截断模板字符串
+   * （人家刚踩过：整个文件直接语法错误）。
+   */
+  public static int StyleAll(uint target) {
+    int n = 0;
+    EnumWindows(delegate(IntPtr h, IntPtr l) {
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      if (pid != target) return true;
+      if (!IsWindowVisible(h)) return true;
+      StringBuilder sb = new StringBuilder(256);
+      GetClassName(h, sb, 256);
+      if (sb.ToString() != "Chrome_WidgetWin_1") return true;
+      int ex = GetWindowLong(h, -20);
+      if ((ex & 0x80) == 0x80) return true;               // 已经改过了
+      // 注意：这里是 **C#**，位运算用 | 和 & （PowerShell 的 -bor/-band 在这里会编译失败，
+      // 而 Add-Type 的编译错误会被 SilentlyContinue 吞掉，表现成"悄悄什么都没做"）
+      ex = (ex | 0x00000080) & ~0x00040000;               // 加 WS_EX_TOOLWINDOW、去 WS_EX_APPWINDOW
+      SetWindowLong(h, -20, ex);
+      // 任务栏按钮是按窗口创建时的样式建的：必须"隐藏 → 再显示"才会重建
+      ShowWindow(h, 0);
+      ShowWindow(h, 4);
+      n++;
+      return true;
+    }, IntPtr.Zero);
+    return n;
+  }
+}
+'@
+$target = [uint32]__PID__
+# PID 拿不到窗口时（Edge 有时会先把活交给别的进程），按 profile 目录在命令行里兜底找
+if ($target -eq 0) {
+  $p = Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='chrome.exe'" |
+       Where-Object { $_.CommandLine -like '*__PROFILE__*' } | Select-Object -First 1
+  if ($p) { $target = [uint32]$p.ProcessId }
+}
+/**
+ * 多扫几遍，因为**窗口是陆续出现的**：Chromium 起来时先有一个主窗口，
+ * 随后还可能再开别的可见窗口（实测 Edge 会多出一个小窗）。
+ * 早先"改到第一个就 break"的写法会让后出现的那个继续占着任务栏一格。
+ * StyleAll 自身对已改过的窗口是幂等的，所以重复扫没有副作用。
+ */
+$deadline = (Get-Date).AddSeconds(8)
+$total = 0
+$quiet = 0
+while ($target -ne 0 -and (Get-Date) -lt $deadline -and $quiet -lt 4) {
+  $n = [NekoTaskbar]::StyleAll($target)
+  $total += $n
+  if ($n -gt 0) { $quiet = 0 } else { $quiet++ }
+  Start-Sleep -Milliseconds 500
+}
+if ($total -eq 0) { Write-Output 'NOHWND'; exit 0 }
+Write-Output ('OK ' + $total)
+`;
+
 /** 让系统分配一个空闲端口（CDP 用），避免固定端口撞车 */
 function freePort() {
   return new Promise((resolve) => {
@@ -129,6 +223,8 @@ class BrowserDanmakuChannel {
           this.proc = null;                    // 不是本进程 spawn 的……
           this._foreignPid = prev.pid || 0;    // ……但退出时仍由我们负责收掉
           this.log(`[danmaku-ch] 复用已在运行的浏览器（CDP :${prev.port}）`);
+          // 复用的实例往往是上次残留的，它的任务栏图标也得一并抠掉
+          this._hideFromTaskbar(this._foreignPid);
           return;
         }
       } catch { /* 已失效，走下面的正常启动 */ }
@@ -171,6 +267,48 @@ class BrowserDanmakuChannel {
     }
   }
 
+  /**
+   * 把浏览器窗口从**任务栏**里抠掉（Windows）。
+   *
+   * 起因（2026-09-26 用户反馈）："用浏览器模式时任务栏里一直有个浏览器占着" ——
+   * `--window-position=-3200,-3200` 只把窗口挪出可视区，**任务栏按钮照旧存在**。
+   * 这里给顶层窗口补上 `WS_EX_TOOLWINDOW`：工具窗口不进任务栏，窗口本身仍"可见"，
+   * 所以页面的可见性/定时器行为与之前一模一样（不会像 SW_HIDE 那样被节流）。
+   *
+   * **故意不 await**：这纯属外观优化，绝不能拖慢弹幕通道的建立；
+   * 失败也只是"任务栏多一格"，不影响任何功能。
+   *
+   * @param {number} pid 浏览器主进程号（复用已有实例时传记下来的那个）
+   */
+  _hideFromTaskbar(pid) {
+    if (process.platform !== 'win32') return;
+    const script = HIDE_FROM_TASKBAR_PS
+      .replaceAll('__PID__', String(pid || 0))
+      .replaceAll('__PROFILE__', this.userDataDir.replace(/\\/g, '\\\\'));
+    // -EncodedCommand：脚本里有引号/花括号/中文注释，编码后彻底绕开命令行转义问题
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    let child = null;
+    try {
+      child = spawn('powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+        { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    } catch (e) {
+      this.log('[danmaku-ch] 隐藏任务栏图标失败（不影响弹幕）：' + e.message);
+      return;
+    }
+    // PowerShell 冷启动可能几秒，兜个超时别留僵尸进程
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* 已退出 */ } }, 30000);
+    let out = '';
+    child.stdout.on('data', (d) => { out += String(d); });
+    child.on('error', () => clearTimeout(timer));
+    child.on('exit', () => {
+      clearTimeout(timer);
+      const tail = out.trim().slice(-24);
+      if (tail.includes('OK')) this.log('[danmaku-ch] 浏览器窗口已从任务栏隐藏');
+      else if (tail.includes('NOHWND')) this.log('[danmaku-ch] 没找到浏览器窗口，任务栏可能仍有图标（不影响弹幕）');
+    });
+  }
+
   /** 启动一次并等 CDP 就绪（不做重试，由 _launchBrowser 负责重试） */
   async _spawnOnce() {
     this.port = await freePort();
@@ -186,6 +324,14 @@ class BrowserDanmakuChannel {
       // 窗口挪到屏幕外：既拿到"真实前台窗口"的网络行为，又不打扰用户。
       // （弹幕服务对 headless 与后台页面的态度不同，别改用 --headless。）
       '--window-position=-3200,-3200', '--window-size=1000,760',
+      /**
+       * 关掉后台节流三件套。窗口虽在屏幕外，但一旦 Windows 把它判成"被遮挡"，
+       * Chromium 就可能降频页面定时器 —— 而 B站弹幕客户端靠页面内的定时器发心跳。
+       * 弹幕掉线是最难查的那类问题，这几面保险值得加。
+       */
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
       'about:blank',
     ], { stdio: 'ignore' });
     this.proc.on('exit', () => {
@@ -206,6 +352,8 @@ class BrowserDanmakuChannel {
         if (v && v.webSocketDebuggerUrl) {
           this.log(`[danmaku-ch] CDP 就绪：${v.Browser}`);
           this._writeStateFile();      // 记下端口/pid，供下次（含别的进程）复用与清理
+          // 窗口已经建出来了：把它的任务栏图标抠掉（不 await，纯外观优化）
+          this._hideFromTaskbar(this.proc ? this.proc.pid : 0);
           return;
         }
       } catch { /* 还没起来 */ }

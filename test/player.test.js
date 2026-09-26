@@ -342,6 +342,45 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
     const admin = await engine.skip({ uid: '9999', uname: '房管', isAdmin: true });
     ok('房管可以切', admin && admin.ok === true, admin && ('nowPlaying=' + admin.nowPlaying));
 
+    /**
+     * **主播本人**（2026-09-26 加）。
+     *
+     * 回归背景：`handleDanmaku` 一直在用 `engine.anchorUid` 判 isAnchor，但那个字段
+     * **从来没被赋过值** —— 于是主播自己发指令会被回"该指令需要房管/主播权限"。
+     * 用真实用户的话说："我本身就是主播，但通过直播姬打指令说我没有权限"。
+     *
+     * 判据两条：uid（房间信息里的房主 uid）优先，昵称兜底
+     * （实测主播从直播姬发与从网页发，服务端侧并不完全一致）。
+     */
+    {
+      const backupUid = engine.anchorUid;
+      const backupName = engine.anchorName;
+      engine.danmaku = { roomId: 17537, stats: {} };
+      engine.anchorUid = 7626049;
+      engine.anchorName = '';
+
+      ok('主播 uid 命中 → 认成主播', engine._isAnchorUser({ uid: 7626049, uname: '某主播' }) === true);
+      ok('主播 uid 以字符串给出也认（各通道类型不一致）', engine._isAnchorUser({ uid: '7626049', uname: '某主播' }) === true);
+      ok('普通观众 → 不是主播', engine._isAnchorUser({ uid: 123456, uname: '观众甲' }) === false);
+      ok('没有 uid 时不误判', engine._isAnchorUser({ uid: 0, uname: '观众乙' }) === false);
+      ok('未连接弹幕时不算主播', (() => { const d = engine.danmaku; engine.danmaku = null; const r = engine._isAnchorUser({ uid: 7626049 }); engine.danmaku = d; return r === false; })());
+
+      // 昵称兜底：uid 对不上（直播姬 vs 网页），但名字一致
+      engine.anchorName = '某主播';
+      ok('昵称兜底：uid 不同但昵称一致 → 仍认成主播', engine._isAnchorUser({ uid: 999999, uname: '某主播' }) === true);
+      ok('昵称不同则不误认', engine._isAnchorUser({ uid: 999999, uname: '某主播的小号' }) === false);
+
+      // 主播的第一条弹幕会顺手把昵称学下来（房间信息里只有 uid，没有昵称）
+      engine.anchorUid = 7626049;
+      engine.anchorName = '';
+      await engine.handleDanmaku({ uid: 7626049, uname: '某主播', text: '队列', isAdmin: false });
+      ok('从主播的实际弹幕里学到昵称', engine.anchorName === '某主播', engine.anchorName);
+
+      engine.anchorUid = backupUid;
+      engine.anchorName = backupName;
+      engine.danmaku = null;
+    }
+
     // ownOnly=false 时：观众一律不能切（包括本人）
     engine.config.queue.danmakuSkip = { ownOnly: false };
     resetQueue();
@@ -471,8 +510,36 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
     for (let i = 0; i < 5; i++) await capped.put('k' + i, src, { name: 'k' + i });
     ok('缓存总量不超上限', capped.stats().bytes <= 300 * 1024, `${(capped.stats().bytes / 1024).toFixed(0)} KB / 上限 300 KB`);
 
+    /**
+     * 全量列表（2026-09-26 加）。
+     *
+     * 回归背景：控制台的缓存列表原来读 `stats().recent`（服务端只截 10 条），
+     * 前端又 `slice(0,12)` —— 55 条缓存只显示 10 条，用户反馈"显示的项目不全"。
+     * 现在明细走 `list()`，summary 走 `stats()`，两者职责分开：
+     *   · `list()` 默认**全量**，条数必须等于 stats().count
+     *   · `stats()` **不再带任何条目数组**（正是它被截断才出的事，别再加回来）
+     */
+    ok('stats() 不再携带条目列表（避免又被截断）', c.stats().recent === undefined,
+      Object.keys(c.stats()).join(','));
+    const full = c.list();
+    ok('list() 默认返回全量', full.ok && full.items.length === c.stats().count && full.total === c.stats().count,
+      `${full.items.length} 条 / 共 ${full.total}`);
+    ok('list() 里能拿到刚缓存的那条（含歌手与体积）',
+      full.items.some((m) => m.key === key && m.artist === '测试歌手' && typeof m.mb === 'number'),
+      (full.items.find((m) => m.key === key) || {}).name);
+    const cappedList = capped.list({ limit: 2 });
+    ok('list({limit}) 只给前 N 条但仍报全量 total',
+      cappedList.items.length === 2 && cappedList.total === capped.stats().count,
+      `${cappedList.items.length}/${cappedList.total}`);
+    ok('list 按缓存时间倒序（新的在前）',
+      cappedList.items.every((m, i, a) => i === 0 || (a[i - 1].at || 0) >= (m.at || 0)));
+    ok('list({offset}) 跳过前 N 条',
+      (capped.list({ offset: 1 }).items[0] || {}).key !== cappedList.items[0].key,
+      `${(capped.list({ offset: 1 }).items[0] || {}).key}`);
+
     const cleared = await c.clear();
     ok('清空缓存', cleared.ok && c.stats().count === 0, `清掉 ${cleared.removed} 条`);
+    ok('清空后 list() 也空', c.list().items.length === 0 && c.list().total === 0);
   }
 
   // ================================================================ 6b) 已缓存 = 零网络

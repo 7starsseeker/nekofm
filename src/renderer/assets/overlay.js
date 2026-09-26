@@ -24,6 +24,33 @@
   if (ONLY === 'lyrics' || ONLY === 'info') {
     document.documentElement.classList.add('only-' + ONLY);
   }
+  /** 是不是 Electron 的预览窗（直播姬浏览器源不带这个参数） */
+  const PREVIEW = QS.get('preview') === '1';
+
+  /**
+   * 空闲时给**单独信息卡预览窗**用的占位内容。
+   *
+   * 为什么需要（2026-09-26 用户反馈："单独信息卡改选项不能实时更新"）：
+   * 信息卡在没有在播曲目时是**整块隐藏**的（见 renderInfoBar 开头那两个 return）。
+   * 于是"单独信息卡预览窗"这个**整个窗口只有这张卡**的地方，空闲时是一片空白 ——
+   * 用户在里面调位置/缩放/透明度/各种显示开关，**什么都看不见**，看起来就像
+   * "改了不生效"。而"歌词+信息卡"那个窗外加歌词一直在动，对比之下更像"它才是实时的"。
+   *
+   * 所以：**只有"预览 + 只看信息卡"时**，空闲也把卡片画出来，填一套示例值，
+   * 让每个开关都能当场看到效果。正式源（直播姬里不带 preview 的 browser source）
+   * 行为完全不变：没在播就不显示卡片。
+   */
+  const IDLE_PREVIEW = {
+    name: '（示例）歌曲名字会显示在这里',
+    artistText: '示例歌手 / 另一位歌手',
+    sourceLabel: '网易云',
+    quality: '极高',
+    requester: { uname: '示例点歌人' },
+    duration: 225,
+    cover: '',
+  };
+  const IDLE_UPNEXT = '下一首：示例曲目 - 示例歌手（示例点歌人 点）';
+  const IDLE_POS = 83;    // 占位进度：1:23
 
   // ---------------------------------------------------------------- 预览窗工具条
   /**
@@ -271,6 +298,24 @@
     st.setProperty('--align', c.align || 'center');
     els.stage.setAttribute('data-theme', c.theme || 'scroll');
     applyInfoBarStyle();
+    /**
+     * 配到这儿必须**立刻重画信息栏**。
+     *
+     * 2026-09-26 用户反馈："信息卡片不像歌词那样能修改选项之后实时更新"。
+     * 原因就在这一行之前：`applyInfoBarStyle()` 只管外观（位置/主题/缩放/透明度/
+     * 封面尺寸/强调色），而**那些"显示封面 / 显示进度条 / 显示点歌人 / 空闲隐藏 /
+     * 总开关"是在 `renderInfoBar()` 里生效的** —— 而它只在"曲目内容变了"时被调用
+     * （见 SSE state 分支的 sig 比较）。于是改选项要**等到换歌**才看得见，
+     * 用户以为"根本没生效"。
+     *
+     * 这里连带把 `_sig` 清掉（下一次 state 也重画一遍，结果相同、不会闪），
+     * 并按歌词让位的同一套流程重算高度：开关进度条/下一首会改变卡片高度，
+     * 不重算的话歌词区会与被撑高的卡片重叠或留白。
+     */
+    renderInfoBar._sig = null;
+    renderInfoBar();
+    reserveForInfoBar();
+    reapplyCenter();
     /**
      * 这里**不再**靠 `S.renderedIndex = -2` 来"强制重建" ——
      * 那个字段根本没人读（frame() 的重建条件是 lastIndex + renderSig）。
@@ -640,7 +685,12 @@
 
   function renderInfoBar() {
     const b = S.config.infoBar || {};
-    const np = S.nowPlaying;
+    /**
+     * 空闲时是否画"预览占位"（见 IDLE_PREVIEW 的说明）：
+     * 只在**预览窗 + 只看信息卡**时成立，正式源与整体预览都不受影响。
+     */
+    const idlePreview = !S.nowPlaying && PREVIEW && ONLY === 'info';
+    const np = S.nowPlaying || (idlePreview ? IDLE_PREVIEW : null);
     if (!b.enabled || (!np && b.hideWhenIdle)) { els.infoBar.hidden = true; return; }
     if (!np) { els.infoBar.hidden = true; return; }
     els.infoBar.hidden = false;
@@ -702,13 +752,25 @@
     els.ibDur.textContent = fmtTime(S.snapshot.duration || np.duration || 0);
     els.ibPos.hidden = !b.showTime;
     els.ibDur.hidden = !b.showTime;
+    /**
+     * 占位态下进度条与时间是"死的"：`updateInfoBarProgress()` 每帧都会因为
+     * `!S.nowPlaying` 提前返回，没人推它们。这里主动给一组示例值，
+     * 免得预览里进度条永远是 0%、时间停在 0:00 —— 那看着像"进度条坏了"。
+     */
+    if (idlePreview) {
+      els.ibBar.style.width = '37%';
+      els.ibPos.textContent = fmtTime(IDLE_POS);
+      els.ibDur.textContent = fmtTime(IDLE_PREVIEW.duration);
+    }
 
     // 下一首
-    if (b.showUpNext && S.upNext) {
+    if (b.showUpNext && (S.upNext || idlePreview)) {
       els.ibUpNext.hidden = false;
-      els.ibUpNext.textContent = '下一首：' + S.upNext.name
-        + (S.upNext.artistText ? ' - ' + S.upNext.artistText : '')
-        + (S.upNext.uname ? `（${S.upNext.uname} 点）` : '');
+      els.ibUpNext.textContent = S.upNext
+        ? '下一首：' + S.upNext.name
+          + (S.upNext.artistText ? ' - ' + S.upNext.artistText : '')
+          + (S.upNext.uname ? `（${S.upNext.uname} 点）` : '')
+        : IDLE_UPNEXT;
     } else els.ibUpNext.hidden = true;
 
     // 长文本（歌名 / 第二行）溢出时左右循环滚动
@@ -745,12 +807,41 @@
   // ------------------------------------------------------------------ SSE
   // SSE 单连接 + 退避重连的状态（见 control.js 同名注释：6 条连接上限）
   let esRetry = 0;
+  /**
+   * 本页资源的版本戳（服务端在 SSE 建连时用 `hello` 消息告知）。
+   *
+   * **为什么要它**：直播姬的浏览器源会一直挂着同一个页面 —— 我们升级 exe、重启程序，
+   * 它都不会自己重载，于是直播姬里跑的还是旧 JS。用户看到的是
+   * "新版明明修好了、直播姬里还是老样子"，极容易被误判成"修复没生效"
+   * （2026-09-26 实测踩到：信息卡的显示开关新版改完即时生效，挂了很久的直播姬源纹丝不动）。
+   *
+   * 所以：连上时记下 rev；**重连时若 rev 变了**说明程序换过资源 → 自行重载。
+   * 重载挑"当前没有在播曲目"的间隙做，直播画面上几乎看不出来。
+   */
+  let knownRev = null;
+  let reloadPending = false;
+  function scheduleReload() {
+    if (reloadPending) return;
+    reloadPending = true;
+    const attempt = () => {
+      // 有曲目在播就先等：重载会有极短的空白帧，别在正唱的时候闪
+      if (S.nowPlaying) { setTimeout(attempt, 3000); return; }
+      location.reload();
+    };
+    attempt();
+  }
   function connect() {
     const es = new EventSource('/events');
     es.onopen = () => { esRetry = 0; };
     es.onmessage = (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
+
+      if (msg.type === 'hello') {
+        if (!knownRev) knownRev = msg.rev;
+        else if (msg.rev && msg.rev !== knownRev) scheduleReload();
+        return;
+      }
 
       if (msg.type === 'state') {
         // 记住"为什么没有歌词"，用于空闲占位文案（限流 / 这首歌确实没歌词）

@@ -59,6 +59,16 @@ class DanmakuClient extends EventEmitter {
     if (!r.ok) throw new Error(`room_init 失败 code=${r.code} msg=${r.msg}`);
     this.roomId = r.data.room_id;
     /**
+     * **主播的 uid**（`room_init` 的 `data.uid` 就是房主）。
+     *
+     * 2026-09-26 加：engine 判定"这条弹幕是主播本人发的"要用它。
+     * 在这之前 engine 用的是 `this.anchorUid`，而**那个字段从来没被赋过值** ——
+     * 于是"主播特权"整条路是死的：主播自己发指令会被回"需要房管/主播权限"
+     * （用户实测反馈："我本身就是主播，但通过直播姬打指令说我没有权限"）。
+     * 单靠弹幕里的 `admin` 位（房管标记）不够稳：不同客户端发出来的标记并不一致。
+     */
+    this.anchorUid = r.data.uid || 0;
+    /**
      * 房间的开播状态（0=未开播 1=直播中 2=轮播）。
      *
      * **这个字段很关键**：未开播的房间，弹幕服务**能连上、认证也能过，但不推送任何弹幕**。

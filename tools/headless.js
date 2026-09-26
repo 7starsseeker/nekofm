@@ -49,6 +49,16 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
   const engine = new Engine({ config, log });
   const saveConfig = (cfg) => { try { fs.writeFileSync(file, JSON.stringify(cfg, null, 2)); } catch { /* 忽略 */ } };
 
+  /**
+   * 运行日志总线（与 Electron 版同一条路，供 `/logs` 窗口用）。
+   * **命令行这边默认不落盘**：headless 常用于测试，一旦忘了隔离数据目录，
+   * 落盘就会往用户的真实 `data/` 里写文件；而它本来就有真控制台，
+   * 文件日志只在"打包成 exe"时才真正必要。
+   */
+  const { LogBus } = require('../src/main/logbus');
+  const logBus = new LogBus({ file: '' });
+  logBus.install();
+
   const handleCommand = createCommandHandler({
     engine,
     saveConfig,
@@ -72,6 +82,7 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
     ],
     onCommand: handleCommand,
     log,
+    logBus,
   });
 
   const bound = await server.start();

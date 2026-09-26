@@ -331,6 +331,8 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
 
       // ------------------------------------------------ 媒体缓存
       case 'cacheStats': return { ok: true, ...engine.cache.stats() };
+      /** 缓存条目全量列表（按需读取；`limit<=0` = 全部）。`cacheStats` 只有摘要，不含列表 */
+      case 'cacheList': return engine.cache.list({ limit: cmd.limit || 0, offset: cmd.offset || 0 });
       case 'cacheClear': {
         const r = await engine.cache.clear();
         engine.emit('change');
@@ -456,19 +458,13 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
       case 'biliBrowserLogout': return hooks.biliBrowserLogout
         ? hooks.biliBrowserLogout()
         : { ok: false, msg: '登出需要 Electron 运行环境' };
-      case 'neteaseLoadPlaylist': {
-        const pl = await engine.netease.playlist(cmd.id, { limit: cmd.limit || 200 });
-        if (!pl.ok) return pl;
-        let n = 0;
-        for (const t of pl.tracks) {
-          const r = engine.queue.push(t, { uid: 'console', uname: '歌单', isAnchor: true });
-          if (r.ok) n++;
-        }
-        engine.notify('info', `歌单《${pl.name}》已入队 ${n}/${pl.tracks.length} 首`);
-        engine.emit('change');
-        if (!engine.track) engine.next().catch(() => {});
-        return { ok: true, added: n, total: pl.tracks.length, name: pl.name };
-      }
+      /**
+       * 原来的 `neteaseLoadPlaylist` 已删（2026-09-26）：它只做"整单入队"，
+       * 而且 limit 默认 200、界面还硬传 50 —— 100+ 首的歌单点一下只进 50 首，
+       * 容易被当成"歌单导丢了"。现在统一走 `playlistImport`：
+       * 默认汇入「已保存播放列表」，要排队列就传 `autoQueue: true`，
+       * 两条路都取全量、都会过黑名单、都会记录导入信息。
+       */
       case 'neteaseSearch': return engine.netease.search(cmd.keyword || '', { limit: cmd.limit || 20 });
 
       // ------------------------------------------------ 歌单导入
@@ -477,6 +473,11 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
           input: cmd.input,
           limit: cmd.limit || 0,
           filterBlacklist: cmd.filterBlacklist !== false,
+          /**
+           * 默认**汇入「已保存播放列表」**（导入是备货，不该盖掉观众点的歌）；
+           * 只有界面显式要求"整单排进队列"时才 autoQueue。
+           */
+          toSaved: cmd.toSaved !== false,
           autoQueue: !!cmd.autoQueue,
         });
         if (r.ok) saveConfig(engine.config);

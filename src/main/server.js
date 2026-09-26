@@ -126,8 +126,56 @@ class AppServer {
     this.allowRoots = opts.allowRoots || [];
     this.log = opts.log || (() => {});
     this.clients = new Set(); // SSE 连接
+    /**
+     * 运行日志总线（可选）。给了它，`/logs` 页面就能实时看到主进程日志 ——
+     * 打包成 exe 后没有控制台，这是用户唯一能自查的手段（见 logbus.js 的说明）。
+     * 只有明确要日志的 SSE 连接（`/events?logs=1`）才会收到 log 消息，
+     * 免得给控制台/叠加层/播放核心白推一堆无关流量。
+     */
+    this.logBus = opts.logBus || null;
+    this.logClients = new Set();
+    if (this.logBus && typeof this.logBus.onLine === 'function') {
+      this.logBus.onLine((line) => {
+        if (!this.logClients.size) return;
+        const payload = `data: ${JSON.stringify({ type: 'log', ...line })}\n\n`;
+        for (const res of this.logClients) {
+          try { res.write(payload); } catch { /* 断开的连接由 close 事件清理 */ }
+        }
+      });
+    }
     this.server = null;
     this.boundPort = null;
+    /** 静态资源的版本戳（见 _computeAssetRev）：SSE 建连时发给页面，页面据此判断自己是不是旧货 */
+    this.assetRev = this._computeAssetRev();
+  }
+
+  /**
+   * 静态资源（叠加层 / 控制台 / 播放核心的页面与脚本）的**版本戳** = 最新修改时间。
+   *
+   * 为什么需要它：**直播姬的浏览器源会一直挂着那个页面**，我们升级 exe、重启程序，
+   * 它都不会自己重载 —— 于是直播姬里跑的还是升级前的 JS。
+   * 表现极具误导性："新版本明明修好了，直播姬里还是老行为"，用户会怀疑修复没生效
+   * （2026-09-26 实测踩到：信息卡片的显示开关在新版里改完即时生效，
+   * 但直播姬里那个挂了很久的源纹丝不动）。
+   *
+   * 所以把版本戳随 SSE 的 `hello` 消息发给页面，页面发现"和刚连上时不一样了"
+   * 就**在空闲时段自行重载**（见 overlay.js 的 scheduleReload）。
+   */
+  _computeAssetRev() {
+    let rev = 0;
+    const walk = (dir) => {
+      if (!dir) return;
+      let list = [];
+      try { list = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of list) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) { walk(p); continue; }
+        try { rev = Math.max(rev, fs.statSync(p).mtimeMs); } catch { /* 读不到就算了 */ }
+      }
+    };
+    walk(this.rendererDir);
+    walk(this.sharedDir);
+    return String(Math.round(rev));
   }
 
   start() {
@@ -138,6 +186,30 @@ class AppServer {
         res.end('internal error: ' + (e && e.message));
       }));
 
+      let settled = false;
+      /**
+       * **必须用 `server.address().port`，不能用"这次尝试的端口号"。**
+       *
+       * 踩过（2026-09-26）：首选端口被占用时（例如用户自己已经开着一个 NekoFM），
+       * 我们会依次试 37822、37823；而**每次 `listen()` 都会注册一个 once('listening') 回调**，
+       * 真正绑成功那一刻，**之前那些失败尝试的回调会被一并唤起**（用的是各自闭包里那个没绑上的端口号）。
+       * 于是 `resolve(port)` 出去的是**最先那个（被占用的）端口**：
+       *   · `engine.serverBase` 指向**别人的进程** → 取流地址、封面地址、歌词代理全打错端口；
+       *   · 内置测试中心也拿这个 base 发请求 → 测试打到别的实例上（表现为莫名其妙的 403：
+       *     实测就是"打开本地文件后白名单没放行"，其实是在测另一个进程的白名单）。
+       * `address().port` 是"真的绑到哪个端口"的唯一可信来源，跟尝试顺序无关。
+       */
+      this.server.on('listening', () => {
+        if (settled) return;
+        const addr = this.server.address();
+        const actual = addr && addr.port;
+        if (!actual) return;
+        settled = true;
+        this.boundPort = actual;
+        this.log(`[server] 已启动 http://${this.host}:${actual}`);
+        resolve(actual);
+      });
+
       const tryListen = (port, attempt = 0) => {
         this.server.once('error', (err) => {
           if (err.code === 'EADDRINUSE' && attempt < 10) {
@@ -145,11 +217,7 @@ class AppServer {
             tryListen(port + 1, attempt + 1);
           } else reject(err);
         });
-        this.server.listen(port, this.host, () => {
-          this.boundPort = port;
-          this.log(`[server] 已启动 http://${this.host}:${port}`);
-          resolve(port);
-        });
+        this.server.listen(port, this.host);
       };
       tryListen(this.port);
     });
@@ -178,6 +246,21 @@ class AppServer {
 
     if (p === '/events') return this._sse(req, res);
     if (p === '/api/state') return this._json(res, this.getState());
+    /**
+     * 运行日志（供 /logs 窗口回填 + 断线续传）。
+     * `afterSeq` 只取更新的那批：窗口 SSE 重连时不会把整屏日志再刷一遍。
+     */
+    if (p === '/api/logs') {
+      if (!this.logBus) return this._json(res, { ok: false, msg: '日志总线未启用', lines: [] });
+      return this._json(res, {
+        ...this.logBus.recent({
+          limit: Number(u.searchParams.get('limit')) || 0,
+          afterSeq: Number(u.searchParams.get('afterSeq')) || 0,
+        }),
+        /** 落盘路径（窗口里显示出来，"把日志发给别人"时用户要能找到它） */
+        file: this.logBus.filePath || '',
+      });
+    }
     if (p === '/api/lyrics') return this._json(res, this.getLyrics ? this.getLyrics() : { type: 'lyrics', rev: 0, timeline: { meta: {}, lines: [] } });
     if (p === '/api/command' && req.method === 'POST') return this._command(req, res);
     if (p === '/stream/local') return this._streamLocal(u, req, res);
@@ -186,7 +269,7 @@ class AppServer {
     if (p === '/stream/img') return this._streamImage(u, req, res);
 
     // 静态页
-    const map = { '/': 'control.html', '/player': 'player.html', '/overlay': 'overlay.html', '/candidates': 'candidates.html' };
+    const map = { '/': 'control.html', '/player': 'player.html', '/overlay': 'overlay.html', '/logs': 'logs.html', '/candidates': 'candidates.html' };
     if (map[p]) return this._file(res, path.join(this.rendererDir, map[p]));
     if (p.startsWith('/assets/')) {
       const rel = p.slice('/assets/'.length).replace(/\.\./g, '');
@@ -230,6 +313,7 @@ class AppServer {
   }
 
   _sse(req, res) {
+    const u = new URL(req.url, this.baseUrl);
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
@@ -237,6 +321,12 @@ class AppServer {
       'Access-Control-Allow-Origin': '*',
     });
     res.write('retry: 1000\n\n');
+    /**
+     * 第一件事：报上自己的资源版本戳。
+     * 直播姬里挂了很久的浏览器源靠它发现"资源变了、我该重载了"
+     * （页面自己不会重载，见 _computeAssetRev 的说明）。
+     */
+    res.write(`data: ${JSON.stringify({ type: 'hello', rev: this.assetRev })}\n\n`);
     res.write(`data: ${JSON.stringify(this.getState())}\n\n`);
     // 客户端可能在任何时刻接入（直播姬浏览器源刷新、OBS 场景重载、
     // 页面手动刷新），而歌词只在"变化时"才广播 —— 所以必须在这里补发当前歌词，
@@ -270,8 +360,17 @@ class AppServer {
       } catch { /* 忽略 */ }
     }
     this.clients.add(res);
+    /**
+     * `/events?logs=1` → 这个连接还要收运行日志（只有「运行日志」窗口会这么连）。
+     * 单独一册，不跟状态广播混在一起：控制台/叠加层/播放核心不需要这些流量。
+     */
+    if (this.logBus && u.searchParams.get('logs') === '1') this.logClients.add(res);
     const keep = setInterval(() => { try { res.write(': ping\n\n'); } catch { /* 忽略 */ } }, 15000);
-    req.on('close', () => { clearInterval(keep); this.clients.delete(res); });
+    req.on('close', () => {
+      clearInterval(keep);
+      this.clients.delete(res);
+      this.logClients.delete(res);
+    });
   }
 
   _readBody(req) {

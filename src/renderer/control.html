@@ -211,8 +211,13 @@
     box-shadow: 0 -6px 20px rgba(0, 0, 0, .35);
   }
   .pb-cover { width: 54px; height: 54px; border-radius: 8px; object-fit: cover; background: #1b2430; flex: 0 0 auto; }
-  /* 左侧信息区要能被压缩（min-width:0）；固定 260px 会把中间和右侧挤出去 */
-  .pb-meta { flex: 0 1 140px; min-width: 0; }
+  /*
+    左侧信息区要能被压缩（min-width:0）；固定 260px 会把中间和右侧挤出去。
+    **max-height + overflow:hidden 是 2026-09-26 补的**：整条 bar 高度锁死 100px，
+    信息区一旦长高（下面 .pb-line2 那种自由换行），flex 行的行高就被它撑大，
+    居中的传输控件随之被顶到窗口外 —— 用户反馈"歌名太长，下面播放器的控件全被挤没了"。
+  */
+  .pb-meta { flex: 0 1 140px; min-width: 0; max-height: 100%; overflow: hidden; }
   .pb-line1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
   /* pb-name 收窄 → 加 min-width:0 让 ellipsis 真的生效（默认 min-content 会挤其他元素） */
   .pb-name { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; }
@@ -220,6 +225,14 @@
      grow:0 + basis:content → 角标只占自然宽度，剩余都给歌名；
      space 不够时角标自己 ellipsize，不挤歌名 */
   #npBadges { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto; max-width: 60%; min-width: 0; }
+  /*
+    第二行（歌手 · 来源 · 歌词来源）**必须显式 nowrap + ellipsis + min-width:0**。
+    2026-09-26 实测：这行原来一条基础样式都没有（只在窄屏媒体查询里 display:none），
+    于是一旦歌手名很长（群星合作 `artists.join(' / ')` 十几个人很常见）它就自由换行，
+    最多能撑到 239px 高，整条 bar 只有 100px —— 传输控件/进度条/右侧按钮被挤到窗口外，
+    表现就是"控件全没了"。收敛成单行省略号后高度恒为一行。
+  */
+  .pb-line2 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   /* 中间列：上排传输控件、下排进度条 */
   .pb-mid { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
   /* 控件组允许在自己的列里换行，绝不向左/右挤出到别的组上面 */
@@ -336,14 +349,17 @@
     <h2>歌单导入（网易云）</h2>
     <div class="row">
       <input id="plInput" type="text" placeholder="歌单 ID / 链接 / 分享短链，如 3778678" />
-      <input id="plLimit" type="number" value="0" min="0" max="2000" style="width:84px" title="0 = 取全部" />
+      <input id="plLimit" type="number" value="0" min="0" max="2000" style="width:84px" title="0 = 取全部（推荐）" />
     </div>
     <div class="row">
-      <button id="btnPlImport" class="primary">导入并保存</button>
-      <button id="btnPlImportQueue">导入并整单入队</button>
+      <button id="btnPlImport" class="primary">导入到「已保存播放列表」</button>
+      <button id="btnPlImportQueue">导入并整单排进当前队列</button>
       <button id="btnMyPl">我的歌单</button>
     </div>
-    <div class="tip">支持纯数字 ID、网页链接、手机分享短链（<code>163cn.tv/…</code>）。导入时自动过一遍黑名单。</div>
+    <div class="tip">
+      支持纯数字 ID、网页链接、手机分享短链（<code>163cn.tv/…</code>）。导入时自动过一遍黑名单。<br />
+      <b>默认导入到「已保存播放列表」</b>（不打断正在播/正在排的点歌）；想立刻整单排进当前队列，用右边那个按钮。
+    </div>
     <div id="importedList" class="log"></div>
     <div id="plList" class="log"></div>
   </div>
@@ -453,7 +469,7 @@
       <b>未直播</b>时：它就是一张可以直接播放的<b>本地歌单</b>（播放模式、上一首/下一首全都生效）。<br />
       <b>直播中</b>时：它固定作为<b>闲时歌单</b> —— 当前播放列表放空后自动接着放；
       有人点歌时立刻让位给点歌队列。<br />
-      这个列表<b>只靠手动添加</b>（列表项上的「加入已保存」，或下面的来源按钮）。
+      内容来自：歌单导入（默认落这里）、列表项上的「加入已保存」、以及下面的来源按钮。
     </div>
     <div class="row">
       <button id="btnPlaySaved" class="primary">播放已保存歌单</button>
@@ -468,8 +484,7 @@
       <label class="lbl">从其他来源加入：</label>
       <button id="btnSavedFromFav">我的收藏</button>
       <button id="btnSavedFromLocal">本地曲库</button>
-      <button id="btnSavedFromPl">已导入歌单</button>
-      <span class="tip">无论来源，一视同仁汇入这个列表</span>
+      <span class="tip">无论来源，一视同仁汇入这个列表（歌单导入已在上面那个卡片里）</span>
     </div>
   </div>
 
@@ -520,7 +535,8 @@
       不受直链过期影响。<b>45 秒试听片段不会缓存</b>。</div>
     <div class="tip">下面每一条都可以单独 <b>删缓存</b>；「已播放」「已保存」列表里的每一行也都有
       <b>缓存 / 删缓存</b> 按钮（已缓存的会显示绿色角标）。</div>
-    <ul id="cacheList" class="q"></ul>
+    <div class="tip" id="cacheListInfo"></div>
+    <ul id="cacheList" class="q" style="max-height:420px;overflow:auto"></ul>
   </div>
 
   <!-- 测试中心 -->

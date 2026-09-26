@@ -137,6 +137,17 @@ if (!wantGpu) {
 
 const { dir: DATA_DIR, file: CONFIG_FILE } = configPath();
 
+// ------------------------------------------------------------------ 运行日志
+/**
+ * **尽早装日志总线**：打包成 exe 后没有控制台，启动阶段的日志最容易丢
+ * （而"双击后没反应/信息全丢"这类问题恰恰就出在启动阶段）。
+ * 装在这里 → 之后所有 console 输出都进环形缓冲 + 落盘 `data/logs.txt`，
+ * 由「运行日志 / 状态」窗口实时查看（菜单里打开）。
+ */
+const { LogBus } = require('./logbus');
+const logBus = new LogBus({ file: LogBus.defaultFile(DATA_DIR) });
+logBus.install();
+
 // 关键：把 Electron 的 userData（缓存、Cookie、登录会话、GPU 缓存）也挪到
 // 程序目录下。否则它会默认写进 %APPDATA%（C 盘）—— 而这套东西是要整个放
 // T 盘跑的，不该往系统盘里偷偷落东西。必须在 app ready 之前设置。
@@ -175,6 +186,7 @@ app.on('second-instance', () => {
 
 let winControl = null;
 let winPlayer = null;
+let winLogs = null;    // 「运行日志 / 状态」窗口（菜单里可开，见 showLogWindow）
 /**
  * 是否正在退出程序。
  * 播放核心 / 叠加层预览这两个窗口都是"关闭 = 隐藏"，
@@ -500,6 +512,36 @@ function createPlayerWindow(port) {
 }
 
 /**
+ * 显示「运行日志 / 状态」窗口（不存在就建）。
+ *
+ * 为什么需要它：**打包成 exe 后没有控制台** —— `console.log` 写进虚无，
+ * 出现"卡住了 / 点了没反应 / 信息全丢"这类问题时，用户手里一条日志都没有。
+ * 这个窗口把主进程日志（环形缓冲 + `data/logs.txt`）和运行状态（播放/队列/弹幕/网易云/缓存）
+ * 实时摆出来，菜单里可开。窗口关掉只是隐藏，下次打开还在同一份日志上。
+ */
+function showLogWindow() {
+  if (winLogs && !winLogs.isDestroyed()) {
+    winLogs.show();
+    winLogs.focus();
+    return winLogs;
+  }
+  const base = server.baseUrl;
+  winLogs = new BrowserWindow({
+    width: 980, height: 620, show: true,
+    title: 'NekoFM 运行日志 / 状态',
+    icon: APP_ICON,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
+  });
+  winLogs.loadURL(base + '/logs');
+  winLogs.on('close', (e) => {
+    // 与其它窗口一致：程序退出时才真关，平时只是隐藏（日志不丢）
+    if (!isQuitting) { e.preventDefault(); winLogs.hide(); }
+  });
+  winLogs.on('closed', () => { winLogs = null; });
+  return winLogs;
+}
+
+/**
  * 显示播放核心窗口；不存在/已销毁就重建，并把当前曲目重新推给它。
  * 重建后不重推的话，窗口是空的 —— 用户看到的就是"窗口开了但没声音"。
  */
@@ -795,6 +837,7 @@ app.whenReady().then(async () => {
     ],
     onCommand: handleCommand,
     log: (...a) => console.log(...a),
+    logBus,   // 让 /logs 窗口能实时收日志（见 logbus.js）
   });
 
   const port = await server.start();
@@ -907,6 +950,12 @@ app.whenReady().then(async () => {
         { label: '关闭全部预览', click: () => { for (const m of OVERLAY_MODES) { const w = overlayWins[m]; if (w && !w.isDestroyed()) w.hide(); } } },
         { type: 'separator' },
         /**
+         * 打包后的 exe 没有控制台 —— 这个是唯一的"现场"入口，放在窗口菜单里最顺手。
+         */
+        { label: '运行日志 / 状态窗口', click: () => showLogWindow() },
+        { label: '打开日志文件所在目录', click: () => shell.openPath(DATA_DIR) },
+        { type: 'separator' },
+        /**
          * 画面卡住时的"硬修复"：hide → show 会强制整窗口重新合成，
          * 比单纯催重绘（改 1px）强得多；再 reload 一次拿到干净的首帧。
          * 用户实测"催重绘"无效，所以这里必须给更强的动作。
@@ -960,6 +1009,7 @@ app.whenReady().then(async () => {
       tray.setContextMenu(Menu.buildFromTemplate([
         { label: '显示控制台', click: () => showControlWindow() },
         { label: '显示叠加层预览', click: () => presentOverlay('both') },
+        { label: '运行日志 / 状态', click: () => showLogWindow() },
         { type: 'separator' },
         { label: '退出', role: 'quit' },
       ]));
@@ -1019,6 +1069,23 @@ app.whenReady().then(async () => {
         playerDetail = await winPlayer.webContents.executeJavaScript('document.getElementById("status") ? document.getElementById("status").textContent : "?"');
       } catch (e) { playerDetail = '执行 JS 失败：' + e.message; }
 
+      /**
+       * 运行日志窗口：**真的把它打开**再看 DOM。
+       * 这是"打包成 exe 后还有没有办法自查"的唯一入口，值得在冒烟里把住 ——
+       * 菜单点不点得到没法脚本化，但"窗口能不能起来 + 页面节点在不在"可以。
+       */
+      let logWinOk = false;
+      let logDetail = '';
+      try {
+        const w = showLogWindow();
+        await new Promise((r) => setTimeout(r, 1500));
+        logWinOk = await w.webContents.executeJavaScript(
+          '!!document.getElementById("lines") && !!document.getElementById("status") && !!document.getElementById("filter")');
+        const n = await w.webContents.executeJavaScript('document.querySelectorAll("#lines li").length');
+        const conn = await w.webContents.executeJavaScript('document.getElementById("pConn") ? document.getElementById("pConn").textContent : "?"');
+        logDetail = `${conn} · 日志行 ${n}`;
+      } catch (e) { logDetail = '打开失败：' + e.message; }
+
       const checks = [
         ['服务器已监听', !!server.boundPort],
         ['控制台窗口已创建', !!winControl && !winControl.isDestroyed()],
@@ -1032,6 +1099,7 @@ app.whenReady().then(async () => {
         ['叠加层页面加载完成', loaded.overlay],
         ['叠加层 JS 已初始化', overlayDomOk],
         ['控制台 DOM 就绪', controlDomOk],
+        ['运行日志窗口可打开（页面 + 状态栏 + 过滤框就绪）', logWinOk],
         ['引擎已初始化', !!engine],
         ['网易云浏览器急兑通道可用', !!(browserFallback && browserFallback.available)],
         ['B站会话通道可用（登录后视频字幕可用）', !!(biliBrowser && biliBrowser.available)],
@@ -1042,6 +1110,8 @@ app.whenReady().then(async () => {
         if (!okk) bad++;
       }
       console.log(`[smoke] 叠加层: ${overlayDetail}`);
+      console.log(`[smoke] 运行日志窗口: ${logDetail}`);
+      console.log(`[smoke] 播放核心: ${playerDetail}`);
       console.log(`[smoke] 结果: ${checks.length - bad}/${checks.length} 通过`);
       console.log(`[smoke] 引擎状态: track=${engine.track ? engine.track.name : '(无)'} 歌词=${
         engine.lyricTimeline.lines.length} 行 队列=${engine.queue.length}`);

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>NekoFM 运行日志</title>
+<!-- CSP（响应头 + 本页 <head> 里的 meta）由 src/main/server.js 按 CSP_POLICY 统一注入，
+     这里不要手写：写进 <title> 会因 RCDATA 规则整段变成纯文本、CSP 完全不生效（实测踩到）。 -->
+<style>
+  :root { color-scheme: dark; --dim: #7c8798; --accent: #7ee7ff; --warn: #fbbf24; --err: #f87171; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: #0f1319; color: #cfd8e3;
+    font: 13px/1.5 "Microsoft YaHei UI", system-ui, sans-serif;
+  }
+  header {
+    padding: 8px 12px; border-bottom: 1px solid #1e2530;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  header b { color: var(--accent); }
+  .pill {
+    font-size: 12px; padding: 2px 9px; border-radius: 999px;
+    background: #1b2430; color: var(--dim); white-space: nowrap;
+  }
+  .pill.ok { background: #10404a; color: #9fe9ff; }
+  .pill.warn { background: #402d0a; color: #ffd98a; }
+  .pill.err { background: #4a1220; color: #ffb3c0; }
+  .spacer { flex: 1; }
+  button {
+    background: #172030; color: #cfd8e3; border: 1px solid #26313f; border-radius: 8px;
+    padding: 4px 10px; font-size: 12px; cursor: pointer;
+  }
+  button:hover { border-color: #3d556e; }
+  button.on { background: #14586b; border-color: #1d7b93; color: #d9f6ff; }
+  input[type=text] {
+    background: #121a24; color: #cfd8e3; border: 1px solid #26313f; border-radius: 8px;
+    padding: 4px 8px; font-size: 12px; width: 180px;
+  }
+  #status {
+    padding: 6px 12px; border-bottom: 1px solid #1e2530;
+    display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--dim);
+  }
+  #status .kv { background: #141b25; border-radius: 6px; padding: 2px 8px; white-space: nowrap; }
+  #status .kv b { color: #cfd8e3; font-weight: 600; }
+  main { flex: 1; overflow: auto; padding: 4px 0; }
+  #lines { margin: 0; padding: 0; list-style: none; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
+  #lines li { padding: 1px 12px; white-space: pre-wrap; word-break: break-all; border-bottom: 1px solid #141a22; }
+  #lines li .t { color: #5d6b7d; margin-right: 8px; }
+  #lines li.warn { color: #ffd98a; }
+  #lines li.error { color: #ff9db0; background: rgba(120, 24, 32, .18); }
+  #lines li.hit { background: rgba(126, 231, 255, .12); }
+  footer { padding: 6px 12px; border-top: 1px solid #1e2530; color: var(--dim); font-size: 12px; display: flex; gap: 10px; }
+  .hint { color: #5d6b7d; }
+</style>
+</head>
+<body>
+  <header>
+    <b>运行日志</b>
+    <span id="pConn" class="pill">连接中…</span>
+    <span id="pCount" class="pill">0 条</span>
+    <span class="spacer"></span>
+    <input id="filter" type="text" placeholder="过滤关键字（如 netease / 错误代码）" />
+    <button id="btnErrOnly">只看警告/错误</button>
+    <button id="btnPause">暂停滚动</button>
+    <button id="btnCopy">复制全部</button>
+    <button id="btnClear">清屏</button>
+  </header>
+
+  <div id="status">
+    <span class="kv">播放 <b id="stPlayback">—</b></span>
+    <span class="kv">曲目 <b id="stTrack">—</b></span>
+    <span class="kv">队列 <b id="stQueue">—</b></span>
+    <span class="kv">弹幕 <b id="stRoom">—</b></span>
+    <span class="kv">网易云 <b id="stNetease">—</b></span>
+    <span class="kv">缓存 <b id="stCache">—</b></span>
+    <span class="kv">日志文件 <b id="stLogFile">—</b></span>
+  </div>
+
+  <main id="main"><ul id="lines"></ul></main>
+  <footer>
+    <span id="footHint" class="hint">打包成 exe 后没有控制台，这个窗口就是唯一的「现场」——出问题先看这里，或把这份日志发给别人。</span>
+  </footer>
+
+  <script src="/assets/logs.js"></script>
+</body>
+</html>
