@@ -579,14 +579,25 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
     // 批量缓存：放一首在线曲目进已保存，探针保证不真联网（用缓存里的直链）
     engine.config.savedPlaylist = [{ song, uid: 'u1', uname: '甲' }];
     await c.put(key, src, { name: song.name });   // 预先已有缓存 → 应被识别为 already
+    /**
+     * **歌词也必须预先缓存。**
+     *
+     * 踩过的坑（CI 上偶发红，本机几乎不出现）：`cacheFetch` 除了音频还会取歌词，
+     * 而"取歌词"是联网的 —— 网易云一旦限流，客户端会**带退避重试**，
+     * 于是后台任务跑得比这里的等待预算还久，断言"跑完了"就偶发失败。
+     * 音频预缓存了、歌词没预缓存，等于留了一条网络出口。
+     * 两个都预置之后整条链路零网络，这个用例才是确定性的。
+     */
+    c.putLyrics(key, { meta: {}, lines: [{ t: 0, d: 2, text: '甲' }, { t: 2, d: 2, text: '乙' }] }, { name: song.name });
     const calls = [];
     const net = engine.netease;
     const origResolve = net.songUrl.bind(net);
     net.songUrl = async (...a) => { calls.push('songUrl'); return origResolve(...a); };
     try {
       const rb = await engine.cachePrefetch({ source: 'saved' });
-      // 后台跑，等它结束
-      for (let i = 0; i < 60 && engine.prefetchState().running; i++) await sleep(50);
+      // 后台跑，等它结束。预算给足（20s）：本用例已经零网络，正常是毫秒级，
+      // 但 CI 机器负载不可控，卡在"刚好 3 秒"上会变成随机红。
+      for (let i = 0; i < 400 && engine.prefetchState().running; i++) await sleep(50);
       ok('cachePrefetch：能启动并跑完', rb.ok === true && engine.prefetchState().running === false,
         `共 ${rb.total} 首 · songUrl 调用 ${calls.length} 次`);
       const st = engine.state();
