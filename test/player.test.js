@@ -370,6 +370,30 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
       ok('昵称兜底：uid 不同但昵称一致 → 仍认成主播', engine._isAnchorUser({ uid: 999999, uname: '某主播' }) === true);
       ok('昵称不同则不误认', engine._isAnchorUser({ uid: 999999, uname: '某主播的小号' }) === false);
 
+      /**
+       * **打码昵称绝不能当身份**（2026-09-26 用户报"我自己发消息被识别成一堆星号"后加的闸）。
+       * 游客态（认证包 uid=0）下 B站把昵称下发成 `L***`，而**打码不唯一**：
+       * Luna 与 Leo 都是 `L***` —— 认下去就等于给路人发主播权限，比认不出来危险得多。
+       */
+      engine.anchorUid = 7626049;
+      engine.anchorName = '某主播';
+      ok('打码昵称（L***）不匹配真名 → 不误认', engine._isAnchorUser({ uid: 999999, uname: 'L***' }) === false);
+      ok('连主播自己那条打码了也认不出（宁可不认，不能乱认）',
+        engine._isAnchorUser({ uid: 999999, uname: '某***' }) === false);
+      ok('uid 命中时不受打码影响（这是游客态下唯一可靠判据）',
+        engine._isAnchorUser({ uid: 7626049, uname: 'L***' }) === true);
+      {
+        const d = require('../src/core/bilibili/danmaku').DanmakuClient;
+        ok('从 cookie 解析 DedeUserID（认证包不再当游客）',
+          d.uidFromCookie('SESSDATA=abc; DedeUserID=260954; bili_jct=x') === 260954,
+          String(d.uidFromCookie('SESSDATA=abc; DedeUserID=260954; bili_jct=x')));
+        ok('cookie 里没有 DedeUserID → 0（如实表示游客态）', d.uidFromCookie('SESSDATA=abc') === 0);
+        ok('空 cookie 不炸', d.uidFromCookie('') === 0 && d.uidFromCookie(undefined) === 0);
+        ok('构造时自动带上 uid（引擎不传也不会再当游客）',
+          new d({ roomId: 1, cookie: 'DedeUserID=260954' }).uid === 260954);
+        ok('显式传入的 uid 优先', new d({ roomId: 1, uid: 42, cookie: 'DedeUserID=260954' }).uid === 42);
+      }
+
       // 主播的第一条弹幕会顺手把昵称学下来（房间信息里只有 uid，没有昵称）
       engine.anchorUid = 7626049;
       engine.anchorName = '';

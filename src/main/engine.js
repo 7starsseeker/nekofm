@@ -408,6 +408,14 @@ class Engine extends EventEmitter {
        * 昵称随后由主播的第一条弹幕补上（见 handleDanmaku），用于 uid 对不上的兜底。
        */
       if (info.uid) this.anchorUid = info.uid;
+      // 主播昵称来自公开接口（见 danmaku.js 的 _fetchAnchorName）——
+      // 不靠"从弹幕里学"，因为游客态下昵称会被打码
+      if (info.anchorName) this.anchorName = info.anchorName;
+      if (info.uid || info.anchorName) {
+        this.log(`[engine] 主播身份：${this.anchorName || '(昵称未知)'} · uid ${this.anchorUid || 0}`
+          + `｜本端 B站登录 uid ${(dc && dc.uid) || 0}`
+          + `${(dc && dc.uid) ? '' : '（未登录/无 DedeUserID → 昵称可能被打码）'}`);
+      }
       if (info.liveStatus !== 1) {
         const what = info.liveStatus === 2 ? '正在轮播' : '未开播';
         this.notify('warn', `房间 ${info.roomId} ${what}：弹幕服务已连上，但 B站此刻不会推送弹幕；`
@@ -470,6 +478,7 @@ class Engine extends EventEmitter {
       // 主播身份跟着连接走：断开就清掉，免得换房间后还用上一个房间的主播 uid
       this.anchorUid = 0;
       this.anchorName = '';
+      this._danmakuSeen = 0;   // 下次连接重新采样"弹幕身份"，便于排查
       this.emit('change');
     }
   }
@@ -510,27 +519,49 @@ class Engine extends EventEmitter {
    * 这条弹幕是不是**主播本人**发的。
    *
    * 判据按可靠度排序（2026-09-26 加，起因：主播自己发指令被回"需要房管/主播权限"）：
-   *   1. **uid 相等** —— 房间信息（room_init）里的房主 uid，最权威；
-   *   2. **昵称相等** —— 兜底。实测主播从**直播姬**发的弹幕与从网页发的，
-   *      在服务端看来并不完全一致（用户原话"好像识别成不一样的人了"），
-   *      uid 万一对不上时昵称仍能认出本人。B站昵称唯一，且只有主播自己会拿到这个名字。
+   *   1. **uid 相等** —— 房间信息里的房主 uid，最权威，也是唯一在"游客态"下仍然可用的判据；
+   *   2. **昵称相等** —— 兜底（直播姬发的与网页发的在服务端侧并不完全一致，
+   *      uid 万一对不上时昵称还能认出本人）。昵称取自公开的 `get_anchor_in_room`。
+   *
+   * ⚠️ **带星号的昵称一律不认**：游客态下 B站把昵称打码成 `L***`，而打码**不唯一**
+   * （Luna / Leo 都是 `L***`）—— 拿它当身份判据会把别的观众误认成主播，
+   * 那比"认不出来"危险得多（2026-09-26 用户反馈打码昵称后立刻补的这道闸）。
    */
   _isAnchorUser(d) {
     if (!this.danmaku || !d) return false;
     const anchorUid = this.anchorUid;
     if (anchorUid && d.uid && String(d.uid) === String(anchorUid)) return true;
-    return !!(this.anchorName && d.uname && String(d.uname) === String(this.anchorName));
+    const name = this.anchorName;
+    const uname = d.uname;
+    if (!name || !uname) return false;
+    if (String(name).includes('*') || String(uname).includes('*')) return false;
+    return String(uname) === String(name);
   }
 
   /** 弹幕 → 指令 → 动作。所有拒绝原因都会变成一条 notice（可显示在叠加层角标） */
   async handleDanmaku(d) {
     const isAnchor = this._isAnchorUser(d);
     /**
-     * 顺手把主播的昵称学下来：房间信息里只有 uid，没有昵称。
-     * 第一条"uid 命中"的弹幕就带昵称，记下来给 `_isAnchorUser` 的第 2 条判据用
-     * （不额外发请求，也不依赖任何需要登录的接口）。
+     * 前几条弹幕把"是谁发的"写进日志。
+     *
+     * 用户报过一个只能靠日志定位的问题："我自己发的消息被识别成一堆星号"——
+     * 那是认证包里 uid=0 导致服务端按游客下发昵称。这条日志让**运行日志窗口里一眼可见**
+     * （uid 是 0 还是真实数字、昵称有没有带星号），不用再猜。
+     * 只记前 3 条：弹幕量大，逐条记会把日志刷爆。
      */
-    if (isAnchor && d.uname && this.anchorName !== d.uname) this.anchorName = d.uname;
+    if (this._danmakuSeen == null) this._danmakuSeen = 0;
+    if (this._danmakuSeen < 3) {
+      this._danmakuSeen++;
+      this.log(`[engine] 弹幕身份样本 ${this._danmakuSeen}/3：uid=${d.uid} uname=${JSON.stringify(d.uname)}`
+        + ` admin=${!!d.isAdmin} 认成主播=${isAnchor ? '是' : '否'}`
+        + ` | 本端 B站登录 uid=${(this.danmaku && this.danmaku.uid) || 0}`
+        + ` 主播 uid=${this.anchorUid || 0} 昵称=${JSON.stringify(this.anchorName || '')}`);
+    }
+    /**
+     * 顺手把主播昵称学下来（兜底）——但**带星号的不学**：
+     * 游客态下昵称是被打码的（`L***`），学下来只会覆盖掉从公开接口取到的真名。
+     */
+    if (isAnchor && d.uname && !String(d.uname).includes('*') && this.anchorName !== d.uname) this.anchorName = d.uname;
     const user = {
       uid: d.uid, uname: d.uname,
       isAdmin: d.isAdmin, isAnchor,

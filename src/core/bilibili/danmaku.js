@@ -27,8 +27,17 @@ class DanmakuClient extends EventEmitter {
     super();
     this.roomInput = opts.roomId;
     this.roomId = null;
-    this.uid = opts.uid || 0;
     this.cookie = opts.cookie || '';
+    /**
+     * 观众身份 uid（认证包里的 `uid` 字段）。
+     *
+     * **必须给上**：填 0 时 B站把这条连接当**游客** —— 表现是收到的弹幕昵称
+     * 全被打码（`L***` 这种），于是"靠昵称认主播"直接失效，连观众昵称也看不全
+     * （2026-09-26 用户实测反馈："我自己发消息，用户名识别成一堆星号"）。
+     * 引擎那边从来没显式传过 uid，等于一直在当游客 —— 所以这里从 cookie 的
+     * `DedeUserID` 自己解析一份（扫码登录后它必然在 cookie 里）。
+     */
+    this.uid = Number(opts.uid) || DanmakuClient.uidFromCookie(this.cookie) || 0;
     this.log = opts.logger || (() => {});
     /**
      * `external: true` —— 连接由外部通道代持（`browser-channel.js` 拉起的
@@ -51,6 +60,15 @@ class DanmakuClient extends EventEmitter {
   }
 
   // ------------------------------------------------------------ 房间解析
+  /**
+   * 从 cookie 串里取 `DedeUserID`（B站登录后的用户 uid）。
+   * 拿不到就返回 0（未登录 / cookie 过期）—— 调用方据此知道"现在是游客态"。
+   */
+  static uidFromCookie(cookie) {
+    const m = String(cookie || '').match(/(?:^|;\s*)DedeUserID=(\d+)/);
+    return m ? Number(m[1]) : 0;
+  }
+
   async resolveRoom() {
     const r = await biliFetch(
       `https://api.live.bilibili.com/room/v1/Room/room_init?id=${encodeURIComponent(this.roomInput)}`,
@@ -78,15 +96,40 @@ class DanmakuClient extends EventEmitter {
      * 界面必须据此说清楚，别让"连接成功"的假象骗人。
      */
     this.liveStatus = r.data.live_status;
+    /**
+     * **主播昵称**：从公开接口取，不靠弹幕里学。
+     *
+     * 为什么不能"从主播的第一条弹幕里学"：游客态（未登录/uid 为 0）下 B站把昵称打码
+     * （`L***`），学到的就是个面具 —— 更糟的是打码昵称**不唯一**（Luna / Leo 都会是
+     * `L***`），拿它当身份判据会把别的观众误认成主播。
+     * `get_anchor_in_room` 是公开接口（无需登录），一次拿准。
+     */
+    this.anchorName = await this._fetchAnchorName();
     const info = {
       roomId: r.data.room_id,
       shortId: r.data.short_id,
       uid: r.data.uid,
+      anchorName: this.anchorName,
       liveStatus: r.data.live_status,
       encrypted: r.data.encrypted,
     };
     this.emit('room', info);
     return info;
+  }
+
+  /**
+   * 取主播昵称（公开接口，尽力而为）。
+   * 失败不给脸色：认不出昵称只影响"昵称兜底"这一条判据，uid 那条仍然管用。
+   */
+  async _fetchAnchorName() {
+    try {
+      const r = await biliFetch(
+        `https://api.live.bilibili.com/live_user/v1/UserInfo/get_anchor_in_room?roomid=${this.roomId}`,
+        { headers: { Referer: 'https://live.bilibili.com/', Cookie: this.cookie } }
+      );
+      const info = (r.data && r.data.info) || {};
+      return (r.ok && info.uname) || '';
+    } catch { return ''; }
   }
 
   // ------------------------------------------------------------ 取弹幕服务器
@@ -172,7 +215,12 @@ class DanmakuClient extends EventEmitter {
           uid: this.uid,
           roomid: this.roomId,
           protover: 3, // 3=brotli，带宽最省；服务端会按此压缩下发
-          buvid: '',
+          /**
+           * `buvid` 原本恒为空串。顺手从 cookie 里带上真实的 buvid3 ——
+           * 认证包里"uid=0 且 buvid 为空"是最典型的游客画像，正是它让服务端
+           * 把昵称打码下发（见 constructor 里 uid 的注释）。
+           */
+          buvid: (String(this.cookie).match(/(?:^|;\s*)buvid3=([^;]+)/) || [])[1] || '',
           platform: 'web',
           type: 2,
           key: this.token,
