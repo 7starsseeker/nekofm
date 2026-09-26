@@ -299,6 +299,10 @@
     <div class="tip">
       切到「直播中」时，「已保存播放列表」作为<b>闲时歌单</b> —— 当前列表放空后自动接着放；
       有人点歌时它会<b>立刻让位</b>给点歌队列。<br />
+      <b>弹幕只在「直播中」时接收与执行</b>：切到直播中会自动连弹幕（按 `bilibili.autoConnect`），
+      切回「未直播」<b>立即停止接收弹幕</b>，点歌/切歌这类指令也不再有反应。<br />
+      平时想试歌？用下面的<b>点歌框</b>（那条路不经过弹幕，什么时候都能用），
+      或用「注入弹幕」验证指令链路。<br />
       「已保存播放列表」是<b>手动维护</b>的：想留哪首就点它旁边的「加入已保存」，
       下播<b>不会</b>自动往里写（也不会清掉你已有的）。
     </div>
@@ -367,7 +371,8 @@
   <!-- 弹幕房间 -->
   <div class="card">
     <h2>弹幕点歌</h2>
-    <div class="tip">弹幕通道（切换后立即重连）：</div>
+    <div class="tip">弹幕通道（切换后立即重连）：<b>只有在「直播中」状态才会接收弹幕</b> —— 未直播时连接会被停掉，
+      点歌请用上面的点歌框。</div>
     <div class="row">
       <label class="tip" style="display:flex;align-items:center;gap:6px;cursor:pointer">
         <input id="dmOpenLive" type="radio" name="dmMode" value="openlive" />

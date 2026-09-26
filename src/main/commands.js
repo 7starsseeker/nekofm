@@ -616,6 +616,12 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
           uname: cmd.uname || '测试观众',
           text: cmd.text,
           isAdmin: !!cmd.isAdmin,
+          /**
+           * 标记"这是控制台注入的测试弹幕"。
+           * `handleDanmaku` 在**未直播时一律不处理指令**（用户要求指令只在直播中生效），
+           * 但这条是用来测指令链路的，必须放行 —— 否则测试工具会被直播状态挡住。
+           */
+          injected: true,
         });
         return { ok: true, notices: engine.notices.slice(0, 3).map((n) => n.text) };
       }

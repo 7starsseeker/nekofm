@@ -294,9 +294,14 @@ class Engine extends EventEmitter {
         this.log(`[engine] 本地曲库 ${n} 首`);
       } catch (e) { this.log('[engine] 本地扫描失败', e.message); }
     }
-    if (this.config.bilibili.autoConnect && this.config.bilibili.roomId) {
-      this.connectDanmaku(this.config.bilibili.roomId).catch((e) => this.notify('error', '弹幕连接失败：' + e.message));
-    }
+    /**
+     * **启动时不再自动连弹幕**（2026-09-26 用户要求：只有「直播中」才检测弹幕）。
+     *
+     * 直播状态是内存态、启动默认「未直播」，所以"自动连接"这件事挪到了
+     * `setStreaming(true)` 里（那时才代表主播真的开播了）。
+     * `bilibili.autoConnect` 的语义随之变成"切到直播中时自动连"。
+     * 未直播时想点歌 → 用控制台的点歌框（那条路不经过弹幕）。
+     */
     return this;
   }
 
@@ -315,6 +320,17 @@ class Engine extends EventEmitter {
   }
 
   async connectDanmaku(roomId) {
+    /**
+     * **未直播时明确说清"连上也没用"**。
+     *
+     * 连接本身照做（调试/自检需要真连一次看链路），但 `handleDanmaku` 有闸门：
+     * 未直播时任何点歌/切歌指令都不会执行。不提示的话用户会看到
+     * "明明连上了、发弹幕却没反应"，比直接连不上还难查。
+     */
+    if (!this.streaming) {
+      this.notify('warn', '现在是「未直播」状态：弹幕可以连上（便于调试），但点歌/切歌指令不会被执行；'
+        + '要让弹幕点歌生效，请点「开始直播」（或在控制台的点歌框直接点歌）');
+    }
     /**
      * 连接序号：**只认最后一次调用**。
      *
@@ -549,6 +565,18 @@ class Engine extends EventEmitter {
 
   /** 弹幕 → 指令 → 动作。所有拒绝原因都会变成一条 notice（可显示在叠加层角标） */
   async handleDanmaku(d) {
+    /**
+     * **未直播 → 不处理任何弹幕指令**（2026-09-26 用户要求："检测弹幕然后执行
+     * 点歌/切歌指令等仅限在直播状态开启时"）。
+     *
+     * 这是**第二道闸**：切到未直播时 `setStreaming` 已经断开了连接，
+     * 但断开是异步的、且可能还有在途消息 —— 光靠"关连接"挡不住它们。
+     * 控制台点歌走的是另一条路，不经过这里，所以不受影响。
+     *
+     * 例外：控制台「注入弹幕」的测试弹幕（`injected: true`）——
+     * 它本来就是用来验证指令链路的，不该被直播状态挡住。
+     */
+    if (!this.streaming && !d.injected) return;
     const isAnchor = this._isAnchorUser(d);
     /**
      * 前几条弹幕把"是谁发的"写进日志。
@@ -1565,6 +1593,30 @@ class Engine extends EventEmitter {
    * **「已保存播放列表」是手动维护的**：只有点列表项旁边的「加入已保存」才往里加。
    * 下播不再自动写入（曾经自动覆盖、后来自动并入，用户最终明确说只要手动的）。
    */
+  /**
+   * 「直播中」时按配置自动连上弹幕。
+   *
+   * 用户要求（2026-09-26）：**弹幕检测与点歌/切歌指令只在直播状态开启时生效**。
+   * 所以连接的时机从"启动时"挪到了"切到直播中"。
+   *
+   * · 已经连着（或正在连）就不动 —— 否则每次点「直播中」都白重连一次
+   * · `autoConnect` 关掉时只提示、不连，留给用户手动点「连接」
+   * · 没填房间号时说清缺什么（用 openlive 通道时房间由身份码绑定，不用填）
+   */
+  _ensureDanmakuForStreaming() {
+    if (this.danmaku) return;
+    const b = this.config.bilibili || {};
+    if (!b.autoConnect) {
+      this.notify('info', '直播中：弹幕自动连接已关闭，需要点「连接」才开始接收弹幕');
+      return;
+    }
+    if (!b.roomId && (b.danmakuMode || 'browser') !== 'openlive') {
+      this.notify('warn', '直播中：还没填直播间号，弹幕指令收不到（控制台点歌不受影响）');
+      return;
+    }
+    this.connectDanmaku(b.roomId).catch((e) => this.notify('error', '弹幕连接失败：' + e.message));
+  }
+
   setStreaming(on) {
     const want = !!on;
     // 注意：这里**不**提前返回。虽然"下播"已经不再写列表了，但状态切换本身
@@ -1588,10 +1640,17 @@ class Engine extends EventEmitter {
       const session = this.queue.items.length + (this.track ? 1 : 0);
       const total = (this.config.savedPlaylist || []).length;
       this.streaming = false;
+      /**
+       * **停止检测弹幕**（用户要求：指令只在直播状态开启时生效）。
+       * 断开连接 = 不再接收、不再解析、不再执行任何点歌/切歌指令；
+       * 控制台的点歌框走的是另一条路，不受影响。
+       */
+      const hadDanmaku = !!(this.danmaku || this._danmakuBridge);
+      if (hadDanmaku) this.disconnectDanmaku();
       this.notify('info', session
         ? `已切到「未直播」：本次播放列表 ${session} 首（已保存列表保持 ${total} 首不变；`
-          + `想留下某首请点它旁边的「加入已保存」）`
-        : `已切到「未直播」：已保存列表保持 ${total} 首不变`);
+          + `想留下某首请点它旁边的「加入已保存」）` + (hadDanmaku ? '；已停止接收弹幕（点歌请用控制台）' : '')
+        : `已切到「未直播」：已保存列表保持 ${total} 首不变` + (hadDanmaku ? '；已停止接收弹幕（点歌请用控制台）' : ''));
     } else {
       this.streaming = true;
       const saved = this.config.savedPlaylist || [];
@@ -1629,6 +1688,12 @@ class Engine extends EventEmitter {
       } else {
         this.notify('info', '已切到「直播中」：暂无已保存的播放列表');
       }
+      /**
+       * **开始检测弹幕**（用户要求：指令只在直播状态开启时生效）。
+       * 放在最后：先把闲时歌单/自动开播安排好，再连弹幕 ——
+       * 弹幕一连上就可能来指令，那时闲时池应该已经就绪。
+       */
+      this._ensureDanmakuForStreaming();
     }
     this.emit('change');
     return { ok: true, streaming: this.streaming, saved: (this.config.savedPlaylist || []).length };

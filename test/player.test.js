@@ -397,12 +397,42 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
       // 主播的第一条弹幕会顺手把昵称学下来（房间信息里只有 uid，没有昵称）
       engine.anchorUid = 7626049;
       engine.anchorName = '';
-      await engine.handleDanmaku({ uid: 7626049, uname: '某主播', text: '队列', isAdmin: false });
+      /**
+       * 注意：`handleDanmaku` 现在**未直播时一律不处理**（2026-09-26 用户要求：
+       * 指令只在直播状态开启时生效）。这里测的是"从弹幕里学昵称"，
+       * 所以要么进直播中、要么标成注入的测试弹幕 —— 用后者，别为了测试去改直播状态。
+       */
+      await engine.handleDanmaku({ uid: 7626049, uname: '某主播', text: '队列', isAdmin: false, injected: true });
       ok('从主播的实际弹幕里学到昵称', engine.anchorName === '某主播', engine.anchorName);
 
       engine.anchorUid = backupUid;
       engine.anchorName = backupName;
       engine.danmaku = null;
+    }
+
+    /**
+     * **未直播时弹幕指令一律不执行**（2026-09-26 用户要求）。
+     *
+     * 语义：弹幕检测与点歌/切歌指令只在「直播中」生效；未直播时想点歌用控制台的点歌框
+     * （那条路不经过弹幕）。控制台「注入弹幕」的测试弹幕例外（它本来就是测指令链路的）。
+     */
+    {
+      const backupStreaming = engine.streaming;
+      engine.setStreaming(false);
+      // 判据用「这次调用有没有产生新提示」：`队列` 指令只读队列、本地就能回执，
+      // 不联网 —— 拿它当探针最干净（用点歌会走网络，离线环境下的报错会污染判定）。
+      // 先清空提示缓冲，再断言"确实一条都没有"（比比较时间戳稳，毫秒级会撞）。
+      engine.notices = [];
+      await engine.handleDanmaku({ uid: '5001', uname: '观众', text: '队列', isAdmin: true });
+      ok('未直播：弹幕指令不执行（连回执都不产生）', engine.notices.length === 0,
+        `新增提示 ${engine.notices.length} 条`);
+
+      engine.notices = [];
+      await engine.handleDanmaku({ uid: '5001', uname: '观众', text: '队列', isAdmin: true, injected: true });
+      ok('未直播：控制台注入的测试弹幕仍执行（否则测试工具被挡死）', engine.notices.length > 0,
+        (engine.notices[0] || {}).text);
+
+      engine.streaming = backupStreaming;
     }
 
     // ownOnly=false 时：观众一律不能切（包括本人）
