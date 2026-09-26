@@ -62,8 +62,11 @@
     </div>
 
     <div class="hint">
-      这个窗口就是直播放声的进程。请在 <b>VoiceMeeter</b> / Windows 音量合成器里把它的输出接到你的音乐通道。<br />
-      设备下拉来自 <code>setSinkId</code>，可直接选 <code>VoiceMeeter Aux Input</code> 或 <code>CABLE Input</code>。
+      这个窗口就是直播放声的进程。设备下拉来自 <code>setSinkId</code>，
+      直接选一块<b>虚拟声卡</b>的输入口（如 <code>Voicemeeter Aux Input</code> 或 <code>CABLE Input</code>），
+      再去直播软件里采它的输出口 —— 这样音乐单独一路，不和麦克风、游戏声混在一起。<br />
+      这里只负责"选输出设备"，<b>不改系统音频路由</b>（各人接法不同）。
+      为什么需要虚拟声卡、两种常见接法见 README 第 3 节「音频：为什么这里要用 VoiceMeeter」。
     </div>
   </main>
 
