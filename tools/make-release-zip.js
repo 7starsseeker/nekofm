@@ -240,3 +240,8 @@ line(`  文件数 ${files.length}   原始 ${human(raw)}   zip 实际 ${human(ou
 line(`  耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 line('');
 line('接下来：把 zip 作为附件挂到 GitHub Release 上即可。');
+line('');
+line('⚠️ 这个包是**干净**的（不含 data/）—— 也正因如此，如果你要**在本机双击运行**');
+line('   release/win-unpacked 里的绿色版，必须先让它和开发版共用数据，否则它会');
+line('   在 exe 同目录新建一份空 data，看起来像"信息全丢"：');
+line('       npm run link-data        （建立联接；npm run pack:release 结尾已自动跑一次）');

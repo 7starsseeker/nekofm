@@ -37,7 +37,7 @@
     "headless": "node tools/headless.js",
     "pack": "electron-builder --win && node tools/link-data.js",
     "pack:dir": "electron-builder --win --dir",
-    "pack:release": "electron-builder --win --dir && node tools/make-release-zip.js",
+    "pack:release": "electron-builder --win --dir && node tools/make-release-zip.js && node tools/link-data.js",
     "link-data": "node tools/link-data.js"
   },
   "devDependencies": {
