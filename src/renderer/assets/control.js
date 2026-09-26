@@ -35,6 +35,59 @@
     catch { /* 忽略 */ }
   };
 
+  /**
+   * **页面内确认框**（2026-09-27 替换掉原生 `confirm()`）。
+   *
+   * 为什么必须换掉（用户实测报告）：Electron 里的 `confirm()` 是**系统模态对话框**，
+   * 在 Windows 上关掉之后窗口会**收不到键盘输入** —— 光标还在点歌框里闪，
+   * 但打字毫无反应，必须让窗口失去焦点再回来才恢复。
+   * 触发场景极不直观："清理掉非已保存音乐的缓存之后，点歌框就打不了字了"。
+   *
+   * `alert()` 早就因为同类问题换成了 toast（见上面的注释），`confirm()` 是漏网的那批。
+   * 和 toast 相反，确认框**必须**阻断用户（删缓存这类不可逆操作不该盲点），
+   * 所以做成"页面内的模态"：挡操作、不挡主线程，也完全不碰系统焦点。
+   *
+   * @param {string} message 支持 \n 换行（CSS 用 white-space: pre-wrap）
+   * @returns {Promise<boolean>} 确定 → true；取消 / Esc / 点遮罩 → false
+   */
+  function confirmDialog(message) {
+    const mask = $('confirmMask');
+    if (!mask) return Promise.resolve(window.confirm(message));   // 老页面兜底
+    const btnOk = $('confirmOk');
+    const btnCancel = $('confirmCancel');
+    $('confirmText').textContent = String(message == null ? '' : message);
+    const prevFocus = document.activeElement;
+    mask.hidden = false;
+    try { btnOk.focus(); } catch { /* 忽略 */ }
+
+    return new Promise((resolve) => {
+      const done = (val) => {
+        mask.hidden = true;
+        document.removeEventListener('keydown', onKey, true);
+        mask.removeEventListener('mousedown', onMask);
+        btnOk.onclick = null;
+        btnCancel.onclick = null;
+        /**
+         * **把焦点还给原来的元素**。删缓存这类操作常从列表行的按钮点起，
+         * 焦点丢到 body 之后用户接着敲键盘就全落在空气里 —— 这也是
+         * "点歌框打不了字"的另一半原因。
+         */
+        try { if (prevFocus && prevFocus.focus) prevFocus.focus(); } catch { /* 忽略 */ }
+        resolve(val);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); done(false); }
+      };
+      // 只有点"遮罩本身"才算取消；点框内不关（免得误点正文就退出）
+      const onMask = (e) => { if (e.target === mask) done(false); };
+      btnOk.onclick = () => done(true);          // 确定按钮默认聚焦 → 回车即确定
+      btnCancel.onclick = () => done(false);
+      document.addEventListener('keydown', onKey, true);
+      mask.addEventListener('mousedown', onMask);
+    });
+  }
+  window.__nekofmConfirm = confirmDialog;   // 第二个 IIFE（新版面板）也要用
+
   // ------------------------------------------------------------------ 日志
   const logBox = $('log');
   /**
@@ -67,15 +120,82 @@
    *     控制台歌词条与叠加层**都栽过这个坑**（见 overlay.js 的 currentPosition 注释）。
    */
   const SNAP = { position: 0, serverTime: Date.now(), paused: true, timeline: null, diag: null, hasLyric: false, rev: -1 };
-  const strip = { el: null, prev: null, cur: null, trans: null, next: null, on: false, lastIdx: -2, lastCfgSig: null, raf: 0 };
+  const strip = { el: null, prev: null, cur: null, trans: null, next: null, on: false, lastIdx: -2, lastCfgSig: null, lastRev: -1, raf: 0 };
 
   function onLyrics(m) {
     // 歌词是"大对象、低频变"（只在 rev 变化时推），收到就整体换掉
     if (m.rev === SNAP.rev) return;
     SNAP.rev = m.rev;
     SNAP.timeline = m.timeline || null;
-    strip.lastIdx = -2;          // 强制重画
+    /**
+     * 强制重画。**这里不要动 `strip.lastRev`** —— 那个字段由渲染帧自己推进
+     * （`tickLyricStrip` 靠 `lastRev !== SNAP.rev` 判断"换歌了，整条重画"）。
+     * 在这一起改掉的话，这个信号当场就被吃掉了。
+     */
+    strip.lastIdx = -2;
   }
+
+  /** 完整队列的本地缓存（状态里只带前 8 条，见 renderState 的说明） */
+  let queueView = null;
+  let queueFetchSeq = 0;
+  /**
+   * 拉一份**完整**的当前播放列表。
+   * 用序号防乱序：连点几下（顶/撤/切歌）会并发几次请求，
+   * 旧的那次晚回来不能盖掉新的（否则界面会闪回旧队列）。
+   */
+  async function refreshQueue() {
+    const my = ++queueFetchSeq;
+    const r = await api({ action: 'listQueue' });
+    if (my !== queueFetchSeq) return;
+    const d = (r && r.result) || {};
+    if (!d.ok) return;
+    queueView = { current: d.current || null, items: d.items || [], total: d.total || 0 };
+  }
+
+  /**
+   * 「加入已保存」按钮（队列 / 已播放 / 已保存三处共用，见 addItemActions）。
+   *
+   * 用户要求"点了要有实时反馈"：成功之后按钮**立刻**变成「已保存 ✓」并禁用，
+   * 而不是只在右下角日志里写一行。已经在已保存列表里的（服务端算好的 `saved`
+   * 字段）一上来就画成已保存态 —— 不用点也知道这首留过没有。
+   */
+  function mkKeepButton({ saved, title, onAdd }) {
+    const b = document.createElement('button');
+    const markSaved = () => {
+      b.textContent = '已保存 ✓';
+      b.disabled = true;
+      b.title = '已经在「已保存播放列表」里了';
+      b.style.borderColor = '#2c8a4b';
+      b.style.color = '#7fe0a3';
+    };
+    const markIdle = () => {
+      b.textContent = '加入已保存';
+      b.disabled = false;
+      b.title = title || '加入「已保存播放列表」，开播时作为闲时歌单';
+      b.style.borderColor = '';
+      b.style.color = '';
+    };
+    if (saved) markSaved(); else markIdle();
+    b.onclick = async () => {
+      b.disabled = true;
+      b.textContent = '加入中…';
+      let r = null;
+      try { r = await onAdd(); } catch { /* 网络异常按失败处理 */ }
+      const d = (r && r.result) || {};
+      // 「已经在里面了」不算失败：用户的意图本来就达成了
+      if (d.ok || /已经在/.test(d.msg || '')) {
+        markSaved();
+        toast(true, d.ok ? `已加入已保存播放列表：${d.name}` : d.msg);
+        window.__nekofmRefreshLists && window.__nekofmRefreshLists();
+        return;
+      }
+      markIdle();
+      toast(false, '加入已保存失败：' + (d.msg || '未知原因'));
+    };
+    return b;
+  }
+  window.__nekofmMkKeepButton = mkKeepButton;   // 第二个 IIFE（新版面板）复用同一套按钮
+  window.__nekofmRefreshQueue = refreshQueue;   // 同上：队列渲染在第一个 IIFE 里
 
   // ------------------------------------------------------------------ 渲染
   function renderState(s) {
@@ -192,10 +312,24 @@
     // 队列（当前播放列表）
     // **正在播放的那首也要显示出来**：它已被 queue.next() 从待播里取出，
     // 只渲染 items 的话，用户点完歌立刻看到"队列为空"，会以为没点上（实测被反馈）。
-    $('qCount').textContent = s.queue ? `（待播 ${s.queue.total} 首）` : '';
+    /**
+     * 队列：状态广播里只带**前 8 条**（10Hz，刻意压载荷），队列长了就看不到后续项
+     * （用户报告"待播放列表无法查看后续项"）。
+     *
+     * 现在按 `rev`（服务端算的变更签名）判断：变了就拉一份**完整**的（listQueue，
+     * 人力频率的一次请求），渲染仍走下面同一段代码，只是数据源换成 `queueView`。
+     * 签名而不是条数 —— 置顶/上一首回退这类"条数不变的重排"也必须被发现。
+     */
+    const q = s.queue || {};
+    if (q.rev && q.rev !== renderState._qRev) {
+      renderState._qRev = q.rev;
+      refreshQueue();
+    }
+    const qv = queueView || { current: q.current || null, items: q.items || [], total: q.total || 0 };
+    $('qCount').textContent = `（待播 ${qv.total} 首）`;
     const ul = $('queue');
-    const items = (s.queue && s.queue.items) || [];
-    const cur = s.queue && s.queue.current;
+    const items = qv.items || [];
+    const cur = qv.current;
     /**
      * **内容没变就不重建 DOM。**
      *
@@ -215,18 +349,19 @@
       const li = document.createElement('li');
       li.className = 'q-current';
       const owner = cur.uname ? `<span class="by">${escapeHtml(cur.uname)}</span>` : '';
+      // 正在放的那首可能不在待播列表里（从「已播放」回退 / 手动播了队列之外的歌单）
+      // —— 如实说明一句，免得用户以为列表丢歌
+      const where = !cur.outsideQueue ? '正在播放'
+        : (cur.outsideKind === 'idle' ? '正在播放（列表之外的歌单）' : '正在播放（从已播放回退）');
       li.innerHTML = `<span class="idx">▶</span><span class="nm" title="${escapeHtml(cur.name)}">${escapeHtml(cur.name)}</span>`
-        + `<span class="by">正在播放${cur.artistText ? ' · ' + escapeHtml(cur.artistText) : ''}</span>${owner}`;
-      const keep = document.createElement('button');
-      keep.textContent = '加入已保存';
-      keep.title = '加入「已保存播放列表」，开播时作为闲时歌单';
-      // 发 key 而不是 song：队列项的状态是精简版（`_brief`），**没有完整 song 对象** ——
-      // 原来发 `cur.song`（undefined）于是"点了永远不生效"（2026-09-26 修）
-      keep.onclick = async () => {
-        const r = await api({ action: 'savedAdd', key: cur.key, uname: cur.uname });
-        log((r.result && r.result.ok) ? 'info' : 'error',
-          (r.result && r.result.ok) ? `已加入已保存播放列表：${r.result.name}` : ((r.result && r.result.msg) || '加入失败'));
-      };
+        + `<span class="by">${where}${cur.artistText ? ' · ' + escapeHtml(cur.artistText) : ''}</span>${owner}`;
+      const keep = mkKeepButton({
+        saved: cur.saved,
+        title: '加入「已保存播放列表」，开播时作为闲时歌单',
+        // 发 key 而不是 song：队列项的状态是精简版（`_brief`），**没有完整 song 对象** ——
+        // 原来发 `cur.song`（undefined）于是"点了永远不生效"（2026-09-26 修）
+        onAdd: () => api({ action: 'savedAdd', key: cur.key, uname: cur.uname }),
+      });
       li.appendChild(keep);
       ul.appendChild(li);
     }
@@ -278,16 +413,12 @@
       li.appendChild(blk);
 
       // 加入已保存（闲时）列表 —— 队列里的好歌可以留到下一场
-      const keep = document.createElement('button');
-      keep.textContent = '加入已保存';
-      keep.title = '加入「已保存播放列表」，开播时作为闲时歌单循环播放';
-      // 同上：队列项没有 song 字段，要用 key 回查
-      keep.onclick = async () => {
-        const r = await api({ action: 'savedAdd', key: it.key });
-        log((r.result && r.result.ok) ? 'info' : 'error',
-          (r.result && r.result.ok) ? `已加入已保存播放列表：${r.result.name}` : ((r.result && r.result.msg) || '加入失败'));
-        if (r.result && r.result.ok) window.__nekofmRefreshLists && window.__nekofmRefreshLists();
-      };
+      const keep = mkKeepButton({
+        saved: it.saved,
+        title: '加入「已保存播放列表」，开播时作为闲时歌单循环播放',
+        // 同上：队列项没有 song 字段，要用 key 回查
+        onAdd: () => api({ action: 'savedAdd', key: it.key }),
+      });
       li.appendChild(keep);
 
       const rm = document.createElement('button');
@@ -826,7 +957,7 @@
    * 没办法用新 cookie 登新号。
    */
   on('btnNetLogout', 'click', async () => {
-    if (!confirm('登出当前网易云账号？\n\n会清掉：\n  · 浏览器会话的所有登录态\n  · 配置里的 cookie\n\n之后请重新扫码登录。')) return;
+    if (!await confirmDialog('登出当前网易云账号？\n\n会清掉：\n  · 浏览器会话的所有登录态\n  · 配置里的 cookie\n\n之后请重新扫码登录。')) return;
     log('info', '正在登出…');
     const r = await api({ action: 'neteaseBrowserLogout' });
     if (r && r.ok) {
@@ -906,7 +1037,7 @@
   });
 
   on('btnBiliLogout', 'click', async () => {
-    if (!confirm('登出 B站？\n\n会清掉本工具保存的 B站登录态（不影响你浏览器里的 B站登录）。\n之后视频歌词会回落到"按标题匹配网易云"。')) return;
+    if (!await confirmDialog('登出 B站？\n\n会清掉本工具保存的 B站登录态（不影响你浏览器里的 B站登录）。\n之后视频歌词会回落到"按标题匹配网易云"。')) return;
     await api({ action: 'biliBrowserLogout' });
     $('biliStat').textContent = '已登出';
     log('info', '已登出 B站');
@@ -1519,7 +1650,7 @@
     refreshCacheList();
   });
   on('btnCacheClear', 'click', async () => {
-    if (!confirm('清空全部缓存？\n\n音频 + 歌词都会删掉。\n下次播放这些歌会重新从网络取（不受限流保护影响，但会慢一点）。')) return;
+    if (!await confirmDialog('清空全部缓存？\n\n音频 + 歌词都会删掉。\n下次播放这些歌会重新从网络取（不受限流保护影响，但会慢一点）。')) return;
     const r = await api({ action: 'cacheClear' });
     if (r.ok) {
       log('info', `已清空缓存（音频 ${r.result.removed} 条${r.result.lyricsRemoved ? ` · 歌词 ${r.result.lyricsRemoved} 条` : ''}）`);
@@ -1528,7 +1659,7 @@
   });
   // 只清歌词、保留音频：适合"歌词配错了想重新匹配"
   on('btnCacheClearLyrics', 'click', async () => {
-    if (!confirm('只清歌词缓存？\n\n音频保留不动 —— 适合「歌词配错了想重新匹配」的场景。\n清完后播放时会重新联网匹配歌词。')) return;
+    if (!await confirmDialog('只清歌词缓存？\n\n音频保留不动 —— 适合「歌词配错了想重新匹配」的场景。\n清完后播放时会重新联网匹配歌词。')) return;
     const r = await api({ action: 'cacheClearLyrics' });
     if (r && r.ok) { log('info', `已清掉 ${r.result.removed} 首的歌词缓存（音频保留）`); refreshCacheList(); }
   });
@@ -1544,7 +1675,7 @@
       return;
     }
     const preview = (scan.preview || []).slice(0, 6).join('\n  ');
-    if (!confirm(`将清理 ${scan.count} 首不在「已保存播放列表」和「收藏」里的缓存（约 ${scan.mb} MB）。\n\n`
+    if (!await confirmDialog(`将清理 ${scan.count} 首不在「已保存播放列表」和「收藏」里的缓存（约 ${scan.mb} MB）。\n\n`
       + `保留：已保存播放列表 + 收藏 + 正在播放的那首。\n`
       + `下次播放到这些歌时会重新从网络缓存。\n\n`
       + `其中（最多列出 6 条键名）：\n  ${preview}`)) return;
@@ -1558,7 +1689,7 @@
   });
   /** 批量缓存（后台串行跑，进度看顶栏通知 + 本行的"正在批量缓存 N/M"） */
   const prefetch = async (source, label) => {
-    if (!confirm(`批量缓存「${label}」里的在线曲目？\n\n· 后台串行下载，不影响当前播放\n· 已缓存过的会自动跳过\n· 本地曲目不需要缓存`)) return;
+    if (!await confirmDialog(`批量缓存「${label}」里的在线曲目？\n\n· 后台串行下载，不影响当前播放\n· 已缓存过的会自动跳过\n· 本地曲目不需要缓存`)) return;
     const r = await api({ action: 'cachePrefetch', source });
     const d = (r && r.result) || {};
     if (d.ok) log('info', `已开始批量缓存「${label}」（共 ${d.total} 首）`);
@@ -1794,6 +1925,20 @@
     strip.raf = requestAnimationFrame(tickLyricStrip);
     if (!strip.on || !strip.el) return;
 
+    /**
+     * **换歌（歌词 rev 变了）就无条件重画三行 + 翻译行。**
+     *
+     * 2026-09-27 修（用户报"切下一首时上一首的歌词还残留一部分"）：
+     * 原来重建条件只有"行号变了"，而两个提前 return 的分支（无歌词 / 前奏）
+     * 只清了「上一行」「下一行」，**没清翻译行** —— 于是歌词条上会一直挂着
+     * 上一首的翻译那一行（`with-trans` 的高度也赖着不走）。另外，如果新歌的
+     * 当前行号恰好与旧歌相同（长歌词切到中间），行号比较也发现不了歌词换了。
+     * 用 rev 做判据，这一整类残留就都堵住了。
+     */
+    const tlRev = SNAP.rev;
+    const force = strip.lastRev !== tlRev;
+    strip.lastRev = tlRev;
+
     const tl = SNAP.timeline;
     if (!tl || !(tl.lines || []).length) {
       // 没歌词：把**原因**写出来，而不是干挂一个"♪"
@@ -1802,13 +1947,14 @@
       const txt = why
         ? (/操作频繁|请稍候|频繁/.test(why) ? '歌词被网易云限流，稍后自动重试' : '无歌词：' + why)
         : (state && state.track ? '♪ 这首歌没有歌词' : '♪ 未在播放');
-      if (strip.lastIdx !== -3 || strip.cur._why !== txt) {
+      if (force || strip.lastIdx !== -3 || strip.cur._why !== txt) {
         strip.lastIdx = -3;
         strip.cur._why = txt;
         strip.cur.className = 'ls-line ls-cur ls-plain ls-none';
         strip.cur.textContent = txt;
         strip.prev.textContent = '';
         strip.next.textContent = '';
+        applyTransRow(null);       // 翻译行也要清（否则残留上一首的译文）
       }
       return;
     }
@@ -1834,12 +1980,13 @@
     // ---- 还没唱到第一行（前奏 / 刚起播）
     if (!at || at.index < 0) {
       applyStripStyle((config && config.overlay) || {});
-      if (strip.lastIdx !== -1) {
+      if (force || strip.lastIdx !== -1) {
         strip.lastIdx = -1;
         strip.cur.className = 'ls-line ls-cur ls-plain ls-none';
         strip.cur.textContent = '♪ 前奏…';
         strip.prev.textContent = '';
         strip.next.textContent = (tl.lines[0] && tl.lines[0].text) || '';
+        applyTransRow(null);       // 前奏期间不该还挂着上一首的译文
       }
       return;
     }
@@ -1868,7 +2015,7 @@
       ovCfg.fontSize, ovCfg.color, ovCfg.activeColor, ovCfg.strokeColor, ovCfg.strokeWidth,
       ovCfg.opacity, ovCfg.align,
     ].join('|');
-    if (at.index !== strip.lastIdx || cfgSig !== strip.lastCfgSig) {
+    if (force || at.index !== strip.lastIdx || cfgSig !== strip.lastCfgSig) {
       strip.lastCfgSig = cfgSig;
       applyStripStyle(ovCfg);
       strip.lastIdx = at.index;
@@ -2157,7 +2304,7 @@
         : `点一下立刻缓存（音频${hasAudio ? '已有' : '待下'}${hasLyric ? ' / 歌词已有' : ' / 歌词待匹配'}）`;
       const b = mk(full ? '已缓存 ✓' : (hasAudio || hasLyric ? '补缓存' : '缓存'), tip, async () => {
         if (full) {
-          if (!confirm(`删除《${it.name || ''}》的缓存？\n\n音频 ${cache.audio.mb}MB 会被删掉，下次播放要重新联网取。`)) return;
+          if (!await confirmDialog(`删除《${it.name || ''}》的缓存？\n\n音频 ${cache.audio.mb}MB 会被删掉，下次播放要重新联网取。`)) return;
           const r = await call({ action: 'cacheSongDrop', song: it.song });
           const d = (r && r.result) || {};
           if (d.ok) toast(true, `已删除缓存（音频 ${d.audio && d.audio.ok ? '✓' : '未删'}，歌词 ${d.lyrics && d.lyrics.ok ? '✓' : '未删'}）`);
@@ -2188,10 +2335,26 @@
     }
     sel.value = (it.source === 'bilibili') ? 'bvid' : 'song';
 
-    li.appendChild(mk('加入已保存', '加入「已保存播放列表」，开播时作为闲时歌单循环播放', async () => {
-      const r = await call({ action: 'savedAdd', song: it.song, uname: it.uname });
-      toast(!!(r.result && r.result.ok), (r.result && r.result.ok) ? `已加入已保存播放列表：${r.result.name}` : ((r.result && r.result.msg) || '加入失败'));
-      onChanged && onChanged();
+    /**
+     * 「加入已保存」：三个列表共用一套按钮（见 mkKeepButton）。
+     * `it.saved` 由服务端算好 —— 已保存列表里恒为 true，已播放/队列里按去重键判。
+     * 用户要求"点了要有实时反馈"，所以按钮自己会变成「已保存 ✓」，
+     * 而不是只往日志里写一行。
+     */
+    const mkKeep = window.__nekofmMkKeepButton || ((o) => {
+      // 首个 IIFE 没加载（理论上不会）时的兜底：至少能点、能报日志
+      const b = mk(o.saved ? '已保存 ✓' : '加入已保存', o.title, o.onAdd);
+      if (o.saved) b.disabled = true;
+      return b;
+    });
+    li.appendChild(mkKeep({
+      saved: !!it.saved,
+      title: '加入「已保存播放列表」，开播时作为闲时歌单循环播放',
+      onAdd: async () => {
+        const r = await call({ action: 'savedAdd', song: it.song, uname: it.uname });
+        if (r.result && r.result.ok) onChanged && onChanged();
+        return r;
+      },
     }));
     li.appendChild(sel);
     li.appendChild(mk('拉黑', '按所选粒度加入黑名单', async () => {
@@ -2416,6 +2579,8 @@
   window.__nekofmRefreshLists = () => { refreshHistory(); refreshSaved(); };
   loadQueueCfg();
   loadCacheDir();
+  // 队列首屏就要完整列表（状态广播里只带前 8 条，见 renderState 的说明）
+  if (window.__nekofmRefreshQueue) window.__nekofmRefreshQueue();
   refreshHistory();
   refreshSaved();
   /**

@@ -207,6 +207,15 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
         items: withCacheInfo(engine, engine.listSaved()),
         count: (engine.config.savedPlaylist || []).length,
       };
+      /**
+       * 完整「当前播放列表」。
+       *
+       * 为什么要单独一条：`state()` 是 10Hz 广播的，里面只带**前 8 条**待播
+       * （刻意压载荷）。队列长了界面就看不到后续项（用户报告"无法查看后续项"）。
+       * 现在状态广播只发前 8 条 + `queue.rev`（变更签名），界面发现签名变了
+       * 就来拉这一条完整列表 —— 队列变化是人力频率，多这一次请求可以忽略。
+       */
+      case 'listQueue': return { ok: true, ...engine.listQueue() };
       /** 把已保存歌单当本地歌单直接播放（待机时想放点东西） */
       case 'playSaved': {
         /**

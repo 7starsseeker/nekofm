@@ -264,6 +264,40 @@ class SelfTest {
           } },
 
           /**
+           * 契约：**B站多 P 视频要认出分P号**（2026-09-27 用户报告）。
+           *
+           * 钉它的理由：`/x/web-interface/view` 的 `data.cid` **恒为第一 P** 的 ——
+           * 分P号只存在于用户给的那串东西里（页面地址的 `?p=3`、或手写的 `BV… p3`）。
+           * 一旦没人解析它，"点合集第 3P 放第 1P"就会静默重现，而且用户看到的
+           * 只是"歌名对不上"，很难联想到是解析层把分P号丢了。
+           */
+          { id: 'biliPage', name: 'B站多 P：分P号解析（?p=3 / BV… p3）', run: async () => {
+            const { pageRankOf, BiliApi } = require('../core/bilibili/api');
+            const api = new BiliApi({});
+            const cases = [
+              // [输入, 期望的分P号]
+              ['https://www.bilibili.com/video/BV1HP411d7Qj/?spm_id_from=333.788.videopod.episodes&vd_source=a181a7f7&p=3', 3],
+              ['https://www.bilibili.com/video/BV1HP411d7Qj?p=12', 12],
+              ['BV1HP411d7Qj', 1],
+              ['BV1NzfNBMEvZ p3', 3],
+              ['点播 bv1NzfNBMEvZ P2', 2],
+              // 标题里出现 p3 不算（只看末尾 token）—— 否则"我是p3玩家"这类标题会被当分P
+              ['BV1NzfNBMEvZ 我是p3玩家', 1],
+            ];
+            const bad = [];
+            for (const [inp, want] of cases) {
+              if (pageRankOf(inp) !== want) bad.push(`pageRankOf(${inp.slice(0, 36)}…)≠${want}`);
+              const id = await api.parseVideoId(inp);
+              if ((id.page || 1) !== want) bad.push(`parseVideoId(${inp.slice(0, 36)}…).page≠${want}`);
+            }
+            return {
+              ok: bad.length === 0,
+              detail: bad.length ? bad.join(' / ') : `${cases.length} 种写法都能认出分P号`,
+            };
+          } },
+
+
+          /**
            * 指令契约：**`点歌 ID 1234567` → 按网易云 ID 直接点播**（2026-09-26 用户定的）。
            * 解析层要把它**原样透传**给引擎（keyword 保持 `ID <数字>`）再由引擎识别。
            * 一旦有人把 `id` 加进音源别名表（sourceAlias），它就会被拆成"音源 id + 空关键词"

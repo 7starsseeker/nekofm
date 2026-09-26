@@ -92,6 +92,21 @@ const SOURCE_LABEL = {
   bilibili: 'B站视频',
 };
 
+/**
+ * **系统身份**：队列项的 `uid` 落在这里，说明它**不是真人点播**的
+ * （闲时歌单、已保存歌单、历史回退、本地打开、整单导入）。
+ *
+ * 用来回答"现在放的是**观众点的歌**吗"（→ 直播中能不能自由选曲），
+ * 见 `playingOrdered`。**抢占**的判据不是它，而是 `playingFromQueue`
+ * ——那段规则见 `_preemptForOrder()` 的注释。
+ */
+const SYSTEM_UID = new Set(['idle', 'saved', 'history', 'playlist', 'local', '']);
+
+/** 这个 uid 是不是"真人点播"来的（不是歌单/回填塞进来的） */
+const isOrderedUid = (uid) => !SYSTEM_UID.has(String(uid != null ? uid : ''));
+/** 这条队列项是不是"真人点播"来的 */
+const isOrderedItem = (item) => isOrderedUid(item && item.uid);
+
 class Engine extends EventEmitter {
   /**
    * @param {{config:object, log?:Function, browser?:object, biliBrowser?:object, biliChannel?:object}} opts
@@ -191,6 +206,21 @@ class Engine extends EventEmitter {
     this._idleCursor = 0;
     /** 当前是否在播闲时歌单（UI 上要能看出来） */
     this.playingIdle = false;
+    /**
+     * **现在放的这首是不是从点歌队列里取出来播的**（2026-09-27 加）。
+     *
+     * 这条规则的一切判据都靠它 —— "有人点歌时要不要立刻让位给点歌队列"：
+     * 不是在放队列里的歌就让位（闲时歌单 / 已保存歌单 / 手动打开的本地文件…）。
+     * `playingIdle` 描述不了这件事：主播把整份歌单排进队列再放出来时它是 false，
+     * 于是"歌单在放、点歌却不切"（用户实测报过）。
+     */
+    this.playingFromQueue = false;
+    /**
+     * 而且那条队列项**是真人点播的**（观众 / 控制台点的）。
+     * 只在"直播中能不能自由选曲"里用：正在播观众点的歌时拦住手动选曲
+     * （点歌优先），播别的（含主播自己排进队列的歌单曲）就放行。
+     */
+    this.playingOrdered = false;
     /**
      * 用户在**解析直链期间**按了暂停的意图（2026-09-26 加）。
      * loading 时 audio 还指着上一首的源，直接 pause 只能停到旧的；load() 完成
@@ -788,9 +818,24 @@ class Engine extends EventEmitter {
     if (!t) { this.stats.rejected++; return this.notify('warn', `${user.uname}：请附上 BV 号或视频链接`); }
     try {
       const info = await this.bili.videoInfo(t);
+      /**
+       * **多 P 视频要落到用户点的那一 P**（2026-09-27 修）。
+       *
+       * `videoInfo` 已经把 `cid` 换成那一 P 的了（分P号从 `?p=3` / `BV… p3` 里解析），
+       * 这里再把**标题**拼清楚：信息栏要能看出点的是哪一 P，
+       * 而且歌词匹配用分P名比用视频总标题准得多（见 resolveLyrics 里的 partTitle）。
+       */
+      const multi = info.pageCount > 1;
+      const name = multi
+        ? `${info.videoTitle} · P${info.page}${info.partTitle ? ' ' + info.partTitle : ''}`
+        : info.videoTitle;
       return this._enqueue({
-        source: 'bilibili', bvid: info.bvid, id: info.bvid, name: info.title,
-        artists: [info.owner], artistText: info.owner, title: info.title,
+        source: 'bilibili', bvid: info.bvid, id: info.bvid,
+        name, title: name,
+        // 分P：去重键（queue.dedupeKey）与缓存键（cid）都靠它区分"同一视频的不同 P"
+        page: info.page, pageCount: info.pageCount, partTitle: info.partTitle,
+        videoTitle: info.videoTitle,
+        artists: [info.owner], artistText: info.owner,
         duration: info.duration, cover: info.cover, cid: info.cid,
         // 信息栏要用的投稿信息（播放量/弹幕数/投稿时间）
         stats: info.stat, pubdate: info.pubdate, ownerFace: info.ownerFace,
@@ -799,6 +844,16 @@ class Engine extends EventEmitter {
       this.stats.rejected++;
       return this.notify('warn', `${user.uname}：视频解析失败（${e.message}）`);
     }
+  }
+
+  /**
+   * 查 B站视频信息用的**带分P的键**：`BV1xx p3`。
+   * `videoInfo` 会从末尾的 `pN` 认出分P号（见 api.pageRankOf）——
+   * 少了它，补 cid / 找字幕都会落到**第一 P** 上。
+   */
+  _biliLookupKey(song) {
+    if (!song) return '';
+    return Number(song.page) > 1 ? `${song.bvid} p${Number(song.page)}` : String(song.bvid || '');
   }
 
   /**
@@ -864,26 +919,58 @@ class Engine extends EventEmitter {
     this.notify('info', `${user.uname} 点了《${song.name || song.title}》，排在第 ${r.position} 位`);
     this.emit('change');
     /**
-     * 入队后要不要**马上播**？分三种情况（2026-09-26 定）：
-     *   1. 什么都没在播            → 直接开播
-     *   2. **正在播闲时歌单**      → **立刻切到点歌队列**（见 _preemptIdleForOrder）
-     *   3. 正在播别人点的歌        → 不动，只入队（既有语义："引擎不会打断正在播放的歌"）
+     * 入队后要不要**马上切到点歌队列**？规则（2026-09-27 按用户要求定稿）：
      *
-     * 第 2 条是用户要求的：直播中「已保存播放列表」固定扮演闲时歌单，
-     * 而它的定位就是"没人点歌时放点东西" —— 既然有人点了，就该马上让位。
-     * 这也和 AIMP 的队列语义一致："Queue has a priority over playing playlist"。
+     *   · **只要现在放的不是「点歌队列里的歌」** → 立刻切到点歌队列
+     *     （闲时歌单 / 已保存歌单 / 手动打开的本地文件 / 任何队列之外的播放）
+     *   · 正在放点歌队列里的歌 → 不动，新点歌老实排队
+     *     （既有语义："引擎不会打断正在播放的歌"；本人/房管仍可用切歌指令）
+     *
+     * 判据是 `playingFromQueue`（这首歌**是不是从队列里取出来播的**），
+     * 不是"歌单内容"也不是 `playingIdle` —— 后两者都只能描述"怎么进来的",
+     * 于是"主播把整份歌单排进队列后再放出来"这种情形会被漏掉（用户实测报过）。
+     *
+     * 队列本身**照旧先来后到**：新点的歌 `push` 到队尾，抢占只是"开始放队列"
+     * （= 播队首那首）—— 这样点了歌的人在队列前面有人时按顺序等，没人时立刻听到。
+     * 这也和界面上的说明一致："点歌与打开本地文件一视同仁排队，按顺序播放"。
      */
     if (!this.track && this.playback.status === 'idle') this.next().catch(() => {});
-    else if (this.playingIdle) this._preemptIdleForOrder().catch(() => {});
+    else if (!this.playingFromQueue) this._preemptForOrder().catch(() => {});
     return r;
   }
 
   /**
-   * **点歌优先于闲时歌单**：正在播闲时歌单时，新点歌立刻顶掉它。
+   * 把「正在放的那首」从待播里摘掉（如果有）。
    *
-   * 只在"当前这首来自闲时歌单（`playingIdle`）"时抢占 ——
-   * 正在播**别人点的歌**时不动，新点歌照旧排队（那条语义用户明确要求过，
-   * PROGRESS.md 里也记着："引擎不会打断正在播放的歌"）。
+   * 它已经在放了，**不该再排一次** —— 留着会变成"下一首还是它"。
+   * 什么时候会留下：主播点「整份排进当前队列」时，在放的那首也在列表里，
+   * 于是被一起排进了队列（实测：`待播=[正在放的甲, 乙, 丙…]`）。
+   * 后果不止"多放一遍"：有人点歌时抢占 → `queue.next()` 取到 items[0] = 正在放的它
+   * → **把同一首重新载入一遍**，界面上看就是"点歌没反应、还是那首在放"。
+   *
+   * @returns {number} 摘掉了几条
+   */
+  _dropPlayingFromQueue() {
+    if (!this.track) return 0;
+    const key = dedupeKeyOf(this.track);
+    let n = 0;
+    for (let i = this.queue.items.length - 1; i >= 0; i--) {
+      if (this.queue.items[i].key === key) { this.queue.items.splice(i, 1); n++; }
+    }
+    if (n) this.queue.emit('change', this.queue.list());
+    return n;
+  }
+
+  /**
+   * **点歌优先**：现在放的不是「点歌队列里的歌」时，新点歌立刻让位给队列。
+   *
+   * 判据是 `playingFromQueue`：正在放点歌队列里的歌（观众点的、或主播自己排进
+   * 队列的）就不动 —— 新点歌照旧排队（"引擎不会打断正在播放的歌"）。
+   * 除此之外一律让位：闲时歌单、已保存歌单、手动打开的本地文件……
+   *
+   * 抢占 = **开始放队列**（播队首）：
+   *   · 队列本来空 → 队首就是刚点的这首 → 点歌的人立刻听到
+   *   · 队列里已经有人排队 → 新点的排在队尾，先放队首那首（先来后到）
    *
    * 切走的这首走和手动切歌一样的记账路径：`_rememberHistory` 会因为
    * `playingIdle === true` 而**不把它记进「已播放」**（已保存歌单播的不算点播记录），
@@ -891,10 +978,22 @@ class Engine extends EventEmitter {
    *
    * @returns {Promise<boolean>} 是否真的抢占了
    */
-  async _preemptIdleForOrder() {
-    if (!this.track || !this.playingIdle) return false;
-    if (!this.queue.items.length) return false;   // 队列空就别折腾了
-    this.notify('info', '有人点歌了，切到点歌队列（闲时歌单让位）');
+  async _preemptForOrder() {
+    if (!this.track || this.playingFromQueue) return false;
+
+    // 先摘掉"正在放的那首"的重复项（整份排进队列会造出来），
+    // 否则下一步取到的就是它自己 —— 那等于把同一首重新载入一遍，看着像"没切"
+    const dropped = this._dropPlayingFromQueue();
+    if (dropped) {
+      this.log(`[engine] 抢占前摘掉待播里重复的《${this.track.name || this.track.title}》${dropped} 条`);
+    }
+    if (!this.queue.items.length) return false;   // 队列里没有别人等着 → 不用折腾
+
+    if (process.env.NEKOFM_TRACE === '1') {
+      this.log(`[engine] 抢占：${this.track.name || this.track.title} → `
+        + `${(this.queue.items[0] || {}).song && this.queue.items[0].song.name}`);
+    }
+    this.notify('info', '有人点歌了，切到点歌队列');
     this.stats.skipped++;                          // 与手动切歌一致地记一次
     await this.next({ force: true });
     return true;
@@ -1254,6 +1353,8 @@ class Engine extends EventEmitter {
 
     // ---- 取队列下一首（恒定顺序）
     let item = this.queue.next();
+    /** 这首歌是不是"从点歌队列里取出来播的"（闲时顶上 / 列表循环回填另算，见下） */
+    let fromQueue = !!item;
 
     // ---- 队列空了：先看闲时歌单，再看列表循环，最后才是停
     if (!item) {
@@ -1272,6 +1373,7 @@ class Engine extends EventEmitter {
           );
         }
         item = this.queue.next();
+        fromQueue = !!item;
         if (item) this.notify('info', `列表循环：已把 ${back.length} 首重新排入队列`);
       }
     }
@@ -1287,6 +1389,8 @@ class Engine extends EventEmitter {
       this.lyricTimeline = { meta: {}, lines: [] };
       this.lyricRev++;
       this.playingIdle = false;
+      this.playingFromQueue = false;
+      this.playingOrdered = false;
       this.playback = { ...this.playback, status: 'idle', position: 0, duration: 0, error: '' };
       this.emit('player', { action: 'stop' });
       this.emit('change');
@@ -1301,6 +1405,15 @@ class Engine extends EventEmitter {
      * 否则放完闲时曲再放点歌队列的歌，还会被当成闲时曲去套单曲循环。
      */
     this.playingIdle = !!(item.fromIdle || (item.song && !item.uid));
+    /**
+     * 「点歌优先」的两条判据（见 `_enqueue` / `playSavedGuard`）：
+     *   · `playingFromQueue` —— 是不是从点歌队列取出来播的
+     *     → 不是在放队列里的歌，有人点歌就立刻让位
+     *   · `playingOrdered`   —— 而且那一条确实是真人点播的
+     *     → 直播中它决定"能不能自由选曲"（播观众点的歌时不给抢）
+     */
+    this.playingFromQueue = fromQueue;
+    this.playingOrdered = fromQueue && isOrderedItem(item);
     await this.load(item.song, {
       requester: item.uid
         ? { uid: item.uid, uname: item.uname }
@@ -1335,14 +1448,54 @@ class Engine extends EventEmitter {
     if (this.history.length > 100) this.history.splice(0, this.history.length - 100);
   }
 
+  /**
+   * **手动切到"队列之外"的曲目之前**，把正在放的点歌队列曲目记进「已播放」。
+   *
+   * 2026-09-27 修（用户报"播着队列里的歌时手动放别的，就再也回不到刚才那首了"）：
+   * `next()` 会在切歌**之前**调 `_rememberHistory`，所以在队列里顺序播时「上一首」
+   * 一直是好的。但 `playSaved()` 是**直接 load**（不走 next），于是被顶掉的那首
+   * 既不在队列里（早被 `queue.next()` 取走了）、也不在历史里 —— 凭空消失，
+   * 点「上一首」只会回"已经是第一首了"，点「下一首」直接到队列里的下一首。
+   *
+   * 记进 history 之后语义就齐了：`prev()` 从历史里把那首取回来，
+   * 同时把当前这首塞回待播最前，"再切回去"照样成立。
+   */
+  _rememberBeforeManualSwitch() {
+    if (!this.track) return;
+    // 已保存/闲时歌单播的不进「已播放」（既有规则），所以没什么可记的
+    if (this.playingIdle) return;
+    this._rememberHistory(false);
+    /**
+     * 给这条记录**打标**：它是"被手动切歌顶掉"的。
+     *
+     * `prev()` 靠它决定回退方向：手动切走之后，「上一首」的预期是
+     * "回到我刚才在听的那首"（用户明确要求），而不是闲时序列里的上一曲
+     * （那是"放闲时歌单时上一首"的语义）。这条标记弹掉即失效，
+     * 不会影响后来的自由选曲 —— 见 prev() 里的分支顺序。
+     */
+    const rec = this.history[this.history.length - 1];
+    if (rec) rec.interrupted = true;
+  }
+
   /** 上一首：从历史里回退（顺手把当前这首塞回队列最前，便于再切回来） */
   async prev() {
-    // 正在放闲时/已保存歌单 → 走**序列游标回退**，
-    // 这样即使当前是随机播放，"上一首"也确定地回到同一首（用户明确要求）。
-    if (this.playingIdle && this._idleSeq && this._idleIdx > 0) {
+    /**
+     * 分支顺序（2026-09-27 定）：
+     *   1. **有"被手动切歌顶掉"的记录** → 一定走历史。手动切走之后，「上一首」
+     *      的预期就是"回到我刚才在听的那首"（用户明确要求），而不是闲时序列的上一曲。
+     *   2. 正在放闲时/已保存歌单 → 走**序列游标回退**，
+     *      这样即使当前是随机播放，"上一首"也确定地回到同一首（用户明确要求）。
+     *   3. 其余 → 历史。
+     */
+    const lastRec = this.history[this.history.length - 1];
+    const preferHistory = !!(lastRec && lastRec.interrupted);
+    if (!preferHistory && this.playingIdle && this._idleSeq && this._idleIdx > 0) {
       const back = await this._prevIdleTrack();
       if (back) {
         this.stats.played++;
+        // 回退到的还是**队列之外**的闲时序列曲目 —— 两条判据都要归位
+        this.playingFromQueue = false;
+        this.playingOrdered = false;
         await this.load(back.song, { requester: { uid: 'idle', uname: back.uname }, requestedAt: Date.now() });
         this.emit('change');
         return back.song;
@@ -1351,15 +1504,38 @@ class Engine extends EventEmitter {
     const last = this.history.pop();
     if (!last) { this.notify('warn', '已经是第一首了'); return null; }
     if (this.track) {
-      this.queue.items.unshift({
-        seq: 0, key: `hist-${Date.now()}`, song: this.track,
+      /**
+       * 把**即将被切走的这首**塞回待播最前，方便再点「下一首」切回来。
+       *
+       * 2026-09-27 修两处：
+       *   · 用**歌曲自己的去重键**（原来是 `hist-<时间戳>`）。旧键连"这首歌在不在
+       *     已保存列表里"都判不出来，界面上的「加入已保存」状态会错；
+       *     `findQueueSong` 也回查不到它。
+       *   · 走 `queue.rewindTo()` 把 `queue.current` 一起清空 —— 否则那首歌
+       *     会同时出现在"正在播放"和待播第一行，界面上同一个名字出现两次
+       *     （用户报"点了上一首，列表对不上"）。
+       */
+      this.queue.rewindTo({
+        seq: 0, key: dedupeKeyOf(this.track), song: this.track,
         uid: (this.trackMeta && this.trackMeta.requester && this.trackMeta.requester.uid) || 'history',
         uname: (this.trackMeta && this.trackMeta.requester && this.trackMeta.requester.uname) || '历史',
         requestedAt: Date.now(), isAdmin: false,
       });
-      this.queue.emit('change', this.queue.list());
     }
     this.stats.played++;
+    /**
+     * 从历史里回退出来的**一定是点歌队列里的歌** —— `_rememberHistory` 只记队列里的
+     * （闲时/已保存播的不进 history）。所以这几条判据必须一起归位：
+     * 否则从"已保存歌单"回退到队列曲目之后，引擎仍以为在放闲时曲 ——
+     * 界面上会错误地标着"闲时歌单"，有人点歌时还会被抢占当成闲时曲顶掉
+     * （等于把刚退回来的这首跳过去了）。
+     *
+     * `playingOrdered` 取自那条历史记录的点歌人：观众点的 → 是点播曲
+     * （直播中不许手动抢），主播自己排进队列的歌单曲 → 不是。
+     */
+    this.playingIdle = false;
+    this.playingFromQueue = true;
+    this.playingOrdered = isOrderedUid(last.meta && last.meta.requester && last.meta.requester.uid);
     await this.load(last.song, last.meta || {});
     this.emit('change');
     return last.song;
@@ -1712,10 +1888,87 @@ class Engine extends EventEmitter {
     if (!key) return null;
     if (this.queue.current && this.queue.current.key === key) return this.queue.current.song;
     const hit = this.queue.items.find((i) => i.key === key);
-    return hit ? hit.song : null;
+    if (hit) return hit.song;
+    /**
+     * 再兜一层：**正在播放、但已不在待播列表里**的那首（`prev()` 的历史回退、
+     * 或手动切到队列之外的曲目之后）。界面上的「正在播放」行发的就是它的 key，
+     * 少了这一层，那一行的「加入已保存」会回"没有可加入的曲目"。
+     */
+    if (this.track && dedupeKeyOf(this.track) === key) return this.track;
+    return null;
   }
 
-  /** 已保存播放列表（下播时自动存下来的那份） */
+  /**
+   * 「已保存播放列表」的去重键集合。
+   * 列表项与在放曲目都要判"在不在已保存里"，构成一次、复用多次（10Hz 广播）。
+   */
+  _savedKeys() {
+    return new Set((this.config.savedPlaylist || []).map((it) => dedupeKeyOf(it.song)));
+  }
+
+  /**
+   * 队列快照，供界面渲染「当前播放列表」。
+   *
+   * 比 `queue.list()` 多两件事：
+   *   1. 每一项多一个 `saved` 布尔 —— 界面据此把按钮画成「加入已保存」还是「已保存 ✓」
+   *      （用户要求"点了要有实时反馈"）。判据在服务端算，界面不用自己重写去重键规则。
+   *   2. `current` 为空、但有歌在放时，**用当前曲目补一行**。
+   *      `prev()` 之后 `queue.current` 是空的（那首已回退到待播里，见 rewindTo），
+   *      不补的话界面上会看不到"正在播放"的那首。
+   *
+   * @param {number} limit 最多返回多少条待播项
+   */
+  _queueSnapshot(limit = 10) {
+    const snap = this.queue.list(limit);
+    const keys = this._savedKeys();
+    for (const it of snap.items) it.saved = keys.has(it.key);
+
+    /**
+     * 「正在播放」那一行**永远以引擎的 `track` 为准**。
+     *
+     * `queue.current` 允许是个过期指针：上一首历史回退、手动播「已保存歌单」
+     * 之后，它仍然指着被切走的那首（队列自己的 current 只有 `queue.next()`
+     * 在动）。拿它当 ▶ 行就会出现"列表说在放 A、顶栏说在放 B"。
+     *
+     * `outsideKind` 只是给界面一句准确的话：
+     *   · idle    —— 播的是队列之外的歌单（已保存/闲时）
+     *   · history —— 从「已播放」回退出来的
+     */
+    const playingKey = this.track ? dedupeKeyOf(this.track) : null;
+    if (playingKey && (!snap.current || snap.current.key !== playingKey)) {
+      snap.current = {
+        ...this._brief(this.track, {
+          uname: (this.trackMeta && this.trackMeta.requester && this.trackMeta.requester.uname) || '',
+        }),
+        key: playingKey, seq: 0, saved: keys.has(playingKey),
+        outsideQueue: true, outsideKind: this.playingIdle ? 'idle' : 'history',
+      };
+    } else if (snap.current) {
+      snap.current.saved = keys.has(snap.current.key);
+    }
+
+    /**
+     * 变更签名：界面拿它判断"要不要重新拉一份完整队列"。
+     *   · 用它而不是条数 —— 置顶/回退这类**条数不变的重排**也必须被发现
+     *   · 带上 `_savedRev` —— 「已保存列表」变了，每行的「加入已保存/已保存 ✓」
+     *     要跟着刷新（用户要的实时反馈：点完立刻变成已保存态）
+     */
+    snap.rev = `${snap.current ? snap.current.key + (snap.current.outsideQueue ? '@h' : '@q') : '-'}`
+      + `|${snap.items.map((i) => `${i.seq}.${i.key}`).join(',')}`
+      + `|s${this._savedRev || 0}`;
+    return snap;
+  }
+
+  /** 完整队列（界面按需拉，10Hz 的状态广播里只带前几条，省带宽） */
+  listQueue() {
+    return this._queueSnapshot(999);
+  }
+
+  /**
+   * 已保存播放列表（下播时自动存下来的那份）。
+   * `saved` 恒为 true —— 界面三个列表共用一套"加入已保存"按钮渲染，
+   * 靠它把这一列画成「已保存 ✓」，不用为这一列另写分支。
+   */
   listSaved() {
     return (this.config.savedPlaylist || []).map((it) => ({
       name: it.song && (it.song.name || it.song.title),
@@ -1723,6 +1976,7 @@ class Engine extends EventEmitter {
       source: it.song && it.song.source,
       uname: it.uname,
       song: it.song,
+      saved: true,
     }));
   }
 
@@ -1736,9 +1990,19 @@ class Engine extends EventEmitter {
       const r = this.queue.push(it.song, { uid: it.uid || 'saved', uname: it.uname || '已保存', isAnchor: true }, { force: true });
       if (r.ok) n++;
     }
-    this.notify('info', `已把 ${n} 首已保存曲目排入当前队列`);
+    /**
+     * **正在放的那首不要排进来**（2026-09-27 修）。
+     *
+     * 它已经在放了 —— 再排一次就会变成"下一首还是它"，更要命的是有人点歌时
+     * 抢占会取到 items[0] = 正在放的它，把同一首重新载入一遍，
+     * 界面上看就是"点了歌没反应"（用户实测报的就是这个）。
+     *
+     * `clearFirst` 时 current 也被清了，所以这里只在"接着放"的语义下摘。
+     */
+    const dropped = this._dropPlayingFromQueue();
+    this.notify('info', `已把 ${n - dropped} 首已保存曲目排入当前队列${dropped ? '（正在播放的那首不重复排）' : ''}`);
     this.emit('change');
-    return { ok: true, queued: n, total: saved.length };
+    return { ok: true, queued: n - dropped, total: saved.length, skippedPlaying: dropped };
   }
 
   /**
@@ -1778,14 +2042,18 @@ class Engine extends EventEmitter {
      *
      * 放行集合：
      *   · 未直播（这张列表就是普通歌单，怎么点都行）
-     *   · 直播中 + 正在播闲时歌单（`playingIdle`）
+     *   · 直播中 + **现在放的这条不是真人点播的**（`playingOrdered`）：
+     *     闲时歌单、以及主播自己排进队列的歌单曲都算 —— 都能自由选曲
      *   · 直播中 + 什么都没在播（闲时逻辑马上会接管，手动选一首等于选了开头那首）
+     *
+     * 判据用 `playingOrdered` 而不是"在不在已保存列表里"：后者会把
+     * "观众点了一首恰好也在已保存列表里的歌"误判成可以抢（那是实打实的点播曲）。
      *
      * 历史（别绕回去）：更早的规则是"直播中一律不可单独播放"，那太严 ——
      * 主播想听某首只会收到"请先切到未直播"，而切状态代价太大（用户反馈过）。
      */
-    if (this.streaming && this.track && !this.playingIdle) {
-      return { ok: false, msg: '现在播的是观众点的歌（点歌优先），要自由选曲请等闲时歌单接管后' };
+    if (this.streaming && this.track && this.playingOrdered) {
+      return { ok: false, msg: '现在播的是观众点的歌（点歌优先），要自由选曲请等这首放完' };
     }
     return null;
   }
@@ -1853,7 +2121,16 @@ class Engine extends EventEmitter {
       const item = this._seekIdle(idx);
       if (!item) return { ok: false, msg: '取不到可播放的曲目（可能全被黑名单过滤了）' };
 
+      /**
+       * 现在才真的切走：把「刚才正在放的那首点歌队列曲目」记进已播放 ——
+       * 必须在改 `playingIdle` **之前**调（它靠这个字段判断被切走的那首
+       * 是不是队列里播的，见 _rememberBeforeManualSwitch）。
+       */
+      this._rememberBeforeManualSwitch();
       this.playingIdle = true;
+      // 手动播「已保存歌单」= 队列之外的播放 → 有人点歌就该让位
+      this.playingFromQueue = false;
+      this.playingOrdered = false;
       this.stats.played++;
       await this.load(item.song, {
         requester: { uid: 'idle', uname: '已保存歌单' },
@@ -1869,6 +2146,33 @@ class Engine extends EventEmitter {
 
   // ------------------------------------------------ 列表项管理（各列表共用）
   /**
+   * 丢弃闲时序列的缓存（曲池变了就必须重建）。
+   *
+   * 原来只有 `savedAddMany` 做了这件事，「加入已保存」这个**单首**入口没做 ——
+   * 于是正在放闲时歌单时点「加入已保存」，新歌要等下一次重建才可能被排进去
+   * （用户会以为"加了没用"）。增删都该走这里。
+   */
+  _invalidateIdleSeq() {
+    this._idleSeq = null;
+    this._idleIdx = -1;
+    this._idleSeqSig = null;
+    this._idlePoolCache = null;
+  }
+
+  /**
+   * 「已保存播放列表」变了（增/删/清空）。
+   *
+   * 两件事：闲时序列作废（曲池变了）+ 递增 `_savedRev`。
+   * 后者是给界面用的：队列快照的变更签名里带上它，界面才会去重拉一份列表，
+   * 把每行的「加入已保存 / 已保存 ✓」状态刷新过来 —— 不带的话，刚加入的那首
+   * 在队列里还显示"可以加入"（用户要的实时反馈就断了一半）。
+   */
+  _savedChanged() {
+    this._savedRev = (this._savedRev || 0) + 1;
+    this._invalidateIdleSeq();
+  }
+
+  /**
    * 把一首歌加入「已保存播放列表」（也就是闲时歌单的来源）。
    * 任何列表里的条目都能这么加 —— 已播放里听到好听的可以直接留到下一场。
    */
@@ -1880,6 +2184,7 @@ class Engine extends EventEmitter {
       return { ok: false, msg: '已经在已保存播放列表里了' };
     }
     list.push({ song, uid: meta.uid || '', uname: meta.uname || '', requestedAt: Date.now() });
+    this._savedChanged();
     this.emit('change');
     return { ok: true, count: list.length, name: song.name || song.title };
   }
@@ -1902,9 +2207,7 @@ class Engine extends EventEmitter {
       list.push({ song, uid: meta.uid || '', uname: meta.uname || '', requestedAt: Date.now() });
       added++;
     }
-    this._idleSeq = null;
-    this._idleIdx = -1;
-    this._idleSeqSig = null;
+    this._savedChanged();
     this.emit('change');
     return { ok: true, added, dup, count: list.length };
   }
@@ -1947,6 +2250,7 @@ class Engine extends EventEmitter {
     const i = Number(index) - 1;
     if (!Number.isInteger(i) || i < 0 || i >= list.length) return { ok: false, msg: '序号不对' };
     const [removed] = list.splice(i, 1);
+    this._savedChanged();   // 曲池变了 → 闲时序列重建 + 界面重拉队列（saved 角标要跟着变）
     this.emit('change');
     return { ok: true, removed: removed.song && (removed.song.name || removed.song.title) };
   }
@@ -1988,12 +2292,14 @@ class Engine extends EventEmitter {
   clearSaved() {
     const n = (this.config.savedPlaylist || []).length;
     this.config.savedPlaylist = [];
+    this._savedChanged();
     this.emit('change');
     return { ok: true, removed: n };
   }
 
   /** 已播放列表（从当前播放列表里播完的，最近的在前） */
   listHistory(limit = 200) {
+    const keys = this._savedKeys();
     return this.history.slice(-limit).reverse().map((h) => ({
       name: h.song && (h.song.name || h.song.title),
       artistText: h.song && h.song.artistText,
@@ -2001,6 +2307,8 @@ class Engine extends EventEmitter {
       uname: (h.meta && h.meta.requester && h.meta.requester.uname) || '',
       at: h.at,
       song: h.song,
+      /** 已经在「已保存播放列表」里 → 界面把按钮画成「已保存 ✓」 */
+      saved: !!h.song && keys.has(dedupeKeyOf(h.song)),
     }));
   }
 
@@ -2339,7 +2647,8 @@ class Engine extends EventEmitter {
   async _ensureBiliCid(song) {
     if (!song || song.source !== 'bilibili' || !song.bvid || song.cid) return song ? song.cid : null;
     try {
-      const info = await this.bili.videoInfo(song.bvid);
+      // 带分P的键：多 P 视频要补的是**这一 P** 的 cid（否则落到第一 P）
+      const info = await this.bili.videoInfo(this._biliLookupKey(song));
       if (info && info.cid) song.cid = info.cid;
     } catch (e) {
       this.log('[engine] 补 cid 失败，按无 cid 处理:', e.message);
@@ -2384,7 +2693,7 @@ class Engine extends EventEmitter {
     }
 
     if (song.source === 'bilibili') {
-      const info = song.cid ? { cid: song.cid } : await this.bili.videoInfo(song.bvid);
+      const info = song.cid ? { cid: song.cid } : await this.bili.videoInfo(this._biliLookupKey(song));
       const audio = await this.bili.bestAudio(song.bvid, info.cid);
       if (!audio || !audio.url) return { ok: false, msg: '该视频没有可用音频流' };
       return {
@@ -2526,7 +2835,7 @@ class Engine extends EventEmitter {
       // 1) 视频自带 CC / AI 字幕（最贴合"视频音频"的语义；需要登录态，见 api.subtitles）
       let subDiag = '';
       try {
-        const info = song.cid ? { cid: song.cid } : await this.bili.videoInfo(song.bvid);
+        const info = song.cid ? { cid: song.cid } : await this.bili.videoInfo(this._biliLookupKey(song));
         const sub = await this.bili.subtitles(song.bvid, info.cid);
         if (sub.ok && sub.subtitles.length) {
           const s0 = sub.subtitles[0];
@@ -2554,7 +2863,8 @@ class Engine extends EventEmitter {
       }
       // 2) 用视频标题去网易云匹配歌曲
       const hit = await this._matchNetease(
-        { name: song.name || song.title, artists: song.artists || [] },
+        // 多 P 视频：用**分P名**匹配（分P名才是歌名，视频总标题往往是合集名）
+        { name: song.partTitle || song.name || song.title, artists: song.artists || [] },
         { cacheKey: lk },
       );
       if (hit) return hit;
@@ -3326,7 +3636,7 @@ class Engine extends EventEmitter {
         // 只能反馈"这首一直缓存不下来歌词"。
         diag: (this.lyricSource === 'none' || !this.lyricTimeline.lines.length) ? (this.lastLyricDiag || null) : null,
       },
-      queue: this.queue.list(8),
+      queue: this._queueSnapshot(8),
       /**
        * `via` 告诉界面当前走的是哪条通道：
        *   - `openlive`：官方开放平台 —— **房间由身份码绑定决定，界面上的房间号无效**

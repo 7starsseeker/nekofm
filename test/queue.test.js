@@ -148,6 +148,41 @@ t('next 流转与在放', () => {
   assert.strictEqual(done, null);
   assert.strictEqual(q.current, null);
 });
+/**
+ * 回退（「上一首」用的）：把在放那首塞回待播最前，**并且清空 current**。
+ *
+ * 回归（2026-09-27 用户报告"点上一首后列表对不上、以为下一首要跳歌"）：
+ * 原来只 unshift 不清 current —— 那首歌同时是"正在播放"行和待播第一行，
+ * 界面上同一个歌名出现两次，真正在放的那首一行都没有。
+ */
+t('回退：塞回待播最前并清空 current', () => {
+  const q = new SongQueue({ cooldownMs: 0 });
+  q.push(song(1, 'A'), user(1, '甲'));
+  q.push(song(2, 'B'), user(2, '乙'));
+  q.push(song(3, 'C'), user(3, '丙'));
+  q.next();                       // A 在放，待播 [B, C]
+  const playing = q.next();       // B 在放，待播 [C]
+  q.rewindTo(playing);            // 「上一首」：B 塞回待播最前
+  assert.strictEqual(q.current, null, 'current 必须清空（否则同一个歌名出现两次）');
+  assert.deepStrictEqual(q.items.map((i) => i.song.name), ['B', 'C']);
+  // 再「下一首」应该拿到 B（而不是跳过它到 C）
+  assert.strictEqual(q.next().song.name, 'B');
+  assert.strictEqual(q.current.song.name, 'B');
+});
+t('回退：空项不炸', () => {
+  const q = new SongQueue({ cooldownMs: 0 });
+  assert.strictEqual(q.rewindTo(null), null);
+  assert.strictEqual(q.items.length, 0);
+});
+t('B站多 P：不同 P 是两首歌，同一 P 才去重', () => {
+  const q = new SongQueue({ cooldownMs: 0 });
+  const bili = (page) => ({ source: 'bilibili', bvid: 'BV1HP411d7Qj', id: 'BV1HP411d7Qj', page, name: '合集', title: '合集' });
+  assert.strictEqual(q.push(bili(1), user(1, '甲')).ok, true);
+  assert.strictEqual(q.push(bili(3), user(1, '甲')).ok, true, '第 3P 不该被当成重复');
+  assert.strictEqual(q.push(bili(3), user(2, '乙')).reason, 'duplicate', '同一个 P 才去重');
+  assert.strictEqual(dedupeKey(bili(3)), 'bilibili:BV1HP411d7Qj-p3', '键里要带分P号');
+  assert.strictEqual(dedupeKey(bili(1)), 'bilibili:BV1HP411d7Qj', '第 1P 保持原键（与旧数据兼容）');
+});
 t('按序号删除', () => {
   const q = new SongQueue({ cooldownMs: 0 });
   q.push(song(1, 'A'), user(1, '甲'));

@@ -17,6 +17,29 @@ const AUDIO_ID_LABEL = {
   30216: '64K', 30232: '132K', 30280: '192K', 30250: 'Dolby', 30251: 'Hi-Res',
 };
 
+/**
+ * 从输入里取**分P号**（1 起；认不出就是 1）。
+ *
+ * 为什么需要它（2026-09-27 用户报告）：多 P 视频（合集/分P）里
+ * `/x/web-interface/view` 返回的 `data.cid` **恒为第一 P** 的 cid ——
+ * 于是"点了第 3P，放出来的是第 1P"。分P号只存在于用户给的那串东西里
+ * （页面地址的 `?p=3`，或者手写的 `BV… p3`），必须自己解析出来，
+ * 再拿 `data.pages[]` 里那一 P 的 cid 去取流。
+ *
+ * 认两种写法：
+ *   · URL / 查询串：`...&p=3` / `...?p=3`（B站页面地址就是这种）
+ *   · 末尾 token：`BV1xx p3` / `BV1xx P3` —— **只看最后一个 token**，
+ *     免得把视频标题里出现的 "p3" 误当分P号
+ */
+function pageRankOf(input) {
+  const s = String(input || '');
+  const m = s.match(/[?&]p=(\d+)/i);
+  if (m) return Math.max(1, Number(m[1]) || 1);
+  const m2 = s.trim().match(/\s+[Pp](\d+)$/);
+  if (m2) return Math.max(1, Number(m2[1]) || 1);
+  return 1;
+}
+
 class BiliApi {
   constructor({ cookie = '', logger = () => {} } = {}) {
     this.cookie = cookie;
@@ -29,9 +52,10 @@ class BiliApi {
     return { 'User-Agent': UA, Referer: 'https://www.bilibili.com/', ...(this.cookie ? { Cookie: this.cookie } : {}), ...extra };
   }
 
-  /** 从任意输入解析出 BV/AV 号：支持 BV 号、av 号、完整链接、b23.tv 短链 */
+  /** 从任意输入解析出 BV/AV 号：支持 BV 号、av 号、完整链接、b23.tv 短链（顺带带出分P号） */
   async parseVideoId(input) {
     const s = String(input || '').trim();
+    const page = pageRankOf(s);
     /**
      * **BV 前缀大小写宽容**：B站只认大写 `BV`，但观众/主播手打常写成小写 `bv`
      * （旧版严格匹配会直接抛"无法识别视频号"，或者在弹幕那条路上整条被忽略）。
@@ -39,18 +63,20 @@ class BiliApi {
      * 真查不到时由 view 接口如实报错。
      */
     let m = s.match(/[Bb][Vv][0-9A-Za-z]{10}/);
-    if (m) return { bvid: 'BV' + m[0].slice(2) };
+    if (m) return { bvid: 'BV' + m[0].slice(2), page };
     m = s.match(/av(\d+)/i);
-    if (m) return { aid: Number(m[1]) };
+    if (m) return { aid: Number(m[1]), page };
     if (/^https?:\/\/(b23\.tv|bili2233\.cn)\//i.test(s)) {
       const r = await biliFetch(s, { raw: true, headers: this._headers() });
       const loc = r && r.headers ? r.headers.get('location') : null;
       const real = loc || (r && r.url);
       if (real) {
+        // 短链跳转后的地址里也带 `?p=N` → 分P号以**跳转后**的为准
+        const p2 = pageRankOf(real);
         const m2 = String(real).match(/BV[0-9A-Za-z]{10}/);
-        if (m2) return { bvid: m2[0] };
+        if (m2) return { bvid: m2[0], page: p2 };
         const m3 = String(real).match(/av(\d+)/i);
-        if (m3) return { aid: Number(m3[1]) };
+        if (m3) return { aid: Number(m3[1]), page: p2 };
       }
       throw new Error('短链解析失败，请直接给 BV 号');
     }
@@ -94,13 +120,28 @@ class BiliApi {
     const r = await biliFetch(`https://api.bilibili.com/x/web-interface/view?${q}`, { headers: this._headers() });
     if (!r.ok) throw new Error(`view 失败 code=${r.code} msg=${r.msg}`);
     const d = r.data;
+    const pages = (d.pages || []).map((p) => ({ cid: p.cid, page: p.page, part: p.part, duration: p.duration }));
+    /**
+     * **落到用户点的那一 P**（2026-09-27 修，用户报"多 P 视频只放第一 P"）。
+     *
+     * `data.cid` / `data.duration` 都是**第一 P** 的；分P的真实 cid 在
+     * `data.pages[].cid` 里。取不到那一 P（越界/单P视频）时如实退回第一 P。
+     */
+    const wantPage = id.page || 1;
+    const hit = pages.find((p) => p.page === wantPage) || null;
     const info = {
       bvid: d.bvid,
       aid: d.aid,
-      cid: d.cid,
+      cid: (hit && hit.cid) || d.cid,
+      /** 分P信息：`page` 1 起；`partTitle` 这一 P 自己的标题（往往是真正的歌名） */
+      page: hit ? hit.page : 1,
+      pageCount: pages.length || 1,
+      partTitle: (hit && hit.part) || '',
+      /** 视频**总**标题（多 P 时每 P 的分P名在 partTitle 里） */
+      videoTitle: d.title,
       title: d.title,
       desc: (d.desc || '').slice(0, 200),
-      duration: d.duration,
+      duration: (hit && hit.duration) || d.duration,
       cover: BiliApi.httpsify(d.pic),
       owner: d.owner && d.owner.name,
       ownerMid: d.owner && d.owner.mid,
@@ -114,7 +155,7 @@ class BiliApi {
         favorite: d.stat.favorite,
         reply: d.stat.reply,
       } : null,
-      pages: (d.pages || []).map((p) => ({ cid: p.cid, page: p.page, part: p.part, duration: p.duration })),
+      pages,
     };
     this._vidCache.set(key, info);
     return info;
@@ -243,4 +284,4 @@ class BiliApi {
   }
 }
 
-module.exports = { BiliApi, AUDIO_ID_LABEL };
+module.exports = { BiliApi, AUDIO_ID_LABEL, pageRankOf };

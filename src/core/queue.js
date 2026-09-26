@@ -29,8 +29,14 @@ const REASON_TEXT = {
 
 /** 生成去重键：优先用 来源+id，退化到 归一化后的歌名 */
 function dedupeKey(song) {
-  if (song.id && song.source) return `${song.source}:${song.id}`;
-  if (song.bvid) return `bilibili:${song.bvid}`;
+  /**
+   * **B站多 P：同一视频的不同 P 是两首歌**（2026-09-27 加）。
+   * 键里不带分P号的话，"刚点过第 1P"会把第 3P 当成重复直接拒掉 ——
+   * 用户点了合集里的某一集，却收到"这首刚放过/已在队列里"。
+   */
+  const p = Number(song.page) > 1 ? `-p${Number(song.page)}` : '';
+  if (song.id && song.source) return `${song.source}:${song.id}${p}`;
+  if (song.bvid) return `bilibili:${song.bvid}${p}`;
   const t = String(song.title || song.name || '').toLowerCase().replace(/[\s\-_（）()【】\[\]]/g, '');
   const a = (song.artists || []).join('').toLowerCase();
   return `title:${t}|${a}`;
@@ -157,6 +163,29 @@ class SongQueue extends EventEmitter {
 
   /** 预排下一首（不弹出） */
   peek() { return this.items[0] || null; }
+
+  /**
+   * **回退**：把「正在放的那首」塞回待播最前，并清空 `current`。
+   *
+   * 为什么必须把 `current` 一起清掉（2026-09-27 修，用户报"上一首之后列表对不上"）：
+   * 原来「上一首」只是 `items.unshift(当前这首)`，`current` 照样指着它。于是
+   * 那首歌**同时**出现在"正在播放"行和待播第一行 —— 界面上看到同一个歌名两次，
+   * 而真正在放的那首（从历史里回退出来的）反倒不在任何一行里。用户据此判断
+   * "点了上一首，列表却没回去"，进而以为下一首会跳歌。
+   *
+   * 清空 current 之后语义才自洽：正在放的那首由引擎的 `track` 决定，
+   * 队列里就只剩"待播"。界面拿 `state().queue.current` 为空时用当前曲目补一行。
+   *
+   * @param {object} item 待回退的队列项（形状与 items 里的项一致）
+   * @returns {object|null} 塞回去的那一项
+   */
+  rewindTo(item) {
+    if (!item) return null;
+    this.items.unshift(item);
+    this.current = null;
+    this.emit('change', this.list());
+    return item;
+  }
 
   /** 按队列序号（1-based）删除；无 index 时删除自己下一首 */
   remove(index, user = {}) {

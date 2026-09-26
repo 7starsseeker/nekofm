@@ -309,6 +309,108 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
     ok('当前这首被塞回队列便于再切回来', engine.queue.items.some((i) => i.song.title === nowTitle), nowTitle);
   }
 
+  // ================================================================ 2b) 队列指针
+  /**
+   * 回归（2026-09-27 用户反馈逐条对应）：
+   *   · 「上一首」之后，界面上「正在播放」那行必须还是**真正在放**的那首。
+   *     原来 `queue.current` 是个脏值（仍指着被切走的那首），于是同一个歌名在
+   *     列表里出现两次，而真正在放的那首一行都没有 —— 用户据此得出
+   *     "点了上一首队列没回去""下一首会跳歌"的结论（实测反馈"待核查"的那条）。
+   *   · 播着队列里的歌时**手动放别的**（播放已保存歌单）→ 被顶掉的那首原来
+   *     既不在队列、也不在已播放，**凭空消失** → 「上一首」永远回不去。
+   */
+  console.log('\n== 2b) 队列指针：上一首 / 下一首 / 手动切走 ==');
+  {
+    engine.setPlayMode('order');
+    engine.config.idle = { enabled: false };
+    engine.config.savedPlaylist = [];
+
+    // --- 上一首之后：▶ 行必须是真正在放的那首，且不重复出现
+    resetQueue();
+    [0, 1, 2].forEach((i) => enqueue(i, { uid: 'u' + i, uname: '用户' + i, isAnchor: true }));
+    await engine.next(); await sleep(200);
+    await engine.next(); await sleep(200);
+    const second = engine.track.title;
+    await engine.prev(); await sleep(300);
+    const snap = engine.state().queue;
+    ok('上一首之后 ▶ 行是真正在放的那首',
+      !!snap.current && snap.current.name === names[0], `▶ ${snap.current && snap.current.name} / 实际 ${engine.track && engine.track.title}`);
+    ok('▶ 行标明它是从「已播放」回退出来的', !!snap.current && snap.current.outsideQueue === true);
+    /**
+     * 关键：那首歌**只出现一次**。原来它同时是 ▶ 行和待播第一行（出现了两次），
+     * 而真正在放的甲曲一次都没有。现在它回到待播（等着被「下一首」切回来），
+     * ▶ 行是真正在放的那首 —— 各就各位。
+     */
+    const shown = [...(snap.current ? [snap.current.name] : []), ...snap.items.map((i) => i.name)];
+    ok('被切走的那首只出现一次（不再同时占着 ▶ 行和待播行）',
+      shown.filter((n) => n === second).length === 1, shown.join(','));
+    ok('queue.current 不再留着脏值', engine.queue.current === null, String(engine.queue.current));
+
+    await engine.next(); await sleep(200);
+    ok('上一首之后「下一首」回到中间那首（不跳歌）',
+      engine.track.title === second, `${names[0]} → ${engine.track.title}（期望 ${second}）`);
+    await engine.next(); await sleep(200);
+    ok('继续往下走是第 3 首', engine.track.title === names[2], engine.track.title);
+    ok('「已播放」无重复项',
+      new Set(engine.history.map((h) => h.song.title)).size === engine.history.length,
+      engine.history.map((h) => h.song.title).join(' → '));
+
+    // --- 队列在播时手动播「已保存歌单」：被顶掉的那首不能丢
+    resetQueue();
+    engine.config.savedPlaylist = [];
+    [0, 1, 2].forEach((i) => enqueue(i, { uid: 'u' + i, uname: '用户' + i, isAnchor: true }));
+    await engine.next(); await sleep(200);
+    const interrupted = engine.track.title;                       // 甲曲
+    engine.savedAddMany(names.map((_, i) => ({ ...T(i), source: 'local' })));
+    engine.config.idle = { enabled: true, source: 'saved', shuffle: false, avoidRecent: 0 };
+    // 从第 4 行（丁曲）开始手动播放 —— **故意挑一首不在队列里的**，
+    // 免得"手动播的那首"和"队列里的下一首"是同一首，断言就分不清了
+    await engine.playSaved({ from: 4 }); await sleep(300);
+    const manual = engine.track.title;
+    ok('手动播已保存歌单：真的切到了那一首', manual === names[3], `在播 ${manual}（期望 ${names[3]}）`);
+    ok('手动播已保存歌单：被顶掉的那首记进了「已播放」',
+      engine.history.some((h) => h.song.title === interrupted), engine.history.map((h) => h.song.title).join(','));
+    await engine.prev(); await sleep(300);
+    ok('「上一首」回到手动切走前的那首（用户报的那条）',
+      engine.track.title === interrupted, `回到 ${engine.track && engine.track.title}（期望 ${interrupted}）`);
+    ok('回退后 playingIdle 归位（不再被当成闲时曲）', engine.playingIdle === false);
+    await engine.next(); await sleep(300);
+    ok('再「下一首」回到手动播的那首', engine.track.title === manual, `回到 ${engine.track && engine.track.title}（期望 ${manual}）`);
+
+    // --- 长队列：状态广播瘦身，但 listQueue 必须给全（用户报"看不到后续项"）
+    resetQueue();
+    engine.config.savedPlaylist = [];
+    engine.config.idle = { enabled: false };
+    for (let i = 0; i < 12; i++) {
+      engine.queue.push(
+        { ...T(0), source: 'local', id: `fake${i}`, name: `批量曲${i}`, title: `批量曲${i}` },
+        { uid: 'ub', uname: '批量', isAnchor: true },
+      );
+    }
+    const qs = engine.state().queue;
+    ok('状态广播只带前 8 条（10Hz 载荷保持精简）',
+      qs.items.length === 8 && qs.total === 12, `items=${qs.items.length} total=${qs.total}`);
+    ok('状态带 rev（界面据此决定要不要拉完整列表）', typeof qs.rev === 'string' && qs.rev.length > 0);
+    ok('listQueue 给的是**完整**队列', engine.listQueue().items.length === 12, `${engine.listQueue().items.length} 条`);
+
+    // --- saved 角标：界面靠它把按钮画成「已保存 ✓」
+    resetQueue();
+    engine.savedAdd({ ...T(3), source: 'local' });
+    enqueue(3); enqueue(4);
+    const sq = engine.listQueue();
+    ok('已在「已保存」里的队列项带 saved=true',
+      sq.items.find((i) => i.name === names[3]).saved === true);
+    ok('不在「已保存」里的队列项 saved=false',
+      sq.items.find((i) => i.name === names[4]).saved === false);
+    const revA = engine.state().queue.rev;
+    engine.savedAdd({ ...T(0), source: 'local' });
+    ok('「已保存」变化会让 rev 变（否则按钮状态刷不过来）', engine.state().queue.rev !== revA);
+    engine._idleSeq = [{}];   // 假装有闲时序列缓存
+    engine.savedAdd({ ...T(1), source: 'local' });
+    ok('加入已保存会丢弃闲时序列缓存（新歌才能被排进去）', engine._idleSeq === null);
+    engine.config.savedPlaylist = [];
+  }
+
   // ================================================================ 3) 弹幕切歌权限
   console.log('\n== 3) 弹幕切歌权限（谁点的谁能切） ==');
   {
@@ -932,7 +1034,7 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
    *   2. **正在播闲时歌单**  → 点歌**立刻顶掉它**，切到点歌队列
    *   3. 正在播别人点的歌    → 不动，只入队（既有语义："引擎不会打断正在播放的歌"）
    */
-  console.log('\n== 6g) 点歌优先于闲时歌单 ==');
+  console.log('\n== 6g) 点歌优先：队列之外的播放一律让位 ==');
   {
     const mkSong = (i) => ({ ...T(i), source: 'local' });
     const order = (i, who) => engine._enqueue(mkSong(i), { uid: 'viewer-' + i, uname: who || '观众', isAnchor: false });
@@ -984,9 +1086,93 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
     await engine.playSaved({ from: 2 });
     await sleep(250);
     const keep = engine.track.title;
-    const preempted = await engine._preemptIdleForOrder();   // 队列空 → 应返回 false
+    const preempted = await engine._preemptForOrder();   // 队列空 → 应返回 false
     ok('队列为空时抢占是空操作（返回 false）', preempted === false && engine.track.title === keep,
       `仍在播 ${engine.track.title}`);
+
+    /**
+     * 场景 5~7（2026-09-27 用户报告 + 用户随后把规则说清楚了）。
+     *
+     * **规则**（用户原话）："无论何时，只要不是播放点歌队列中的歌的时候，有点歌的情况
+     * 就马上切换到点歌队列；点歌动作发生时，点歌队列中有歌的话就排队，没歌的话就马上
+     * 将点的歌加入点歌队列并且开始播放点歌队列的歌。"
+     *
+     * 判据因此从 `playingIdle`（描述"这首歌怎么进来的"）换成 `playingFromQueue`
+     * （描述"是不是从点歌队列里取的"）。用户实测踩到的两种现场：
+     *   · 主播点过「整份排进当前队列」→ 在放那首也被排进队列**占着队首**，
+     *     抢占取到它就是"把同一首再载入一遍"，看着像点歌没反应（场景 5）
+     *   · 同一首已保存曲从**队列**里放出来时 `playingIdle=false`，
+     *     改前根本不认它是"队列之外的播放"，点歌只会老实排队（场景 6 的前置）
+     */
+    const guestSong = (n) => ({ source: 'local', id: 'guest-' + n, name: '观众点的歌' + n, title: '观众点的歌' + n, duration: 120 });
+    const guest = (n, uid) => engine._enqueue(guestSong(n), { uid, uname: '点歌的观众' });
+
+    // ---- 场景 5：整份排进队列之后点歌 → 让位给队列；新点的歌按先来后到排队
+    resetQueue();
+    engine.history.length = 0;
+    engine.recentPlayed.length = 0;
+    engine.config.savedPlaylist = names.map((_, i) => ({ song: mkSong(i) }));
+    engine.config.idle = { enabled: true, source: 'saved', shuffle: false, avoidRecent: 0 };
+    engine._idleSeq = null; engine._idleIdx = -1; engine._idleSeqSig = null;
+    await engine.playSaved({ from: 1 });
+    await sleep(250);
+    const idling = engine.track.title;
+    engine.queueSaved();
+    await sleep(150);
+    ok('「整份排进当前队列」不会把在放那首再排一遍（否则抢占会取到它自己）',
+      !engine.queue.items.some((i) => i.song.title === idling),
+      `在放 ${idling}；待播 [${engine.queue.items.map((i) => i.song.title).join(',')}]`);
+    await guest(1, 'viewer-9');
+    await sleep(350);
+    ok('点歌立刻让位给点歌队列（不再是把同一首重新载入一遍）',
+      engine.track.title !== idling, `${idling} → ${engine.track.title}`);
+    ok('队列里本来就有人排队 → 放队首那首（先来后到，不插队）',
+      engine.track.title === names[1], `在播 ${engine.track.title}（期望 ${names[1]}）`);
+    ok('新点的那首排在队尾等着',
+      engine.queue.items.length > 0 && engine.queue.items[engine.queue.items.length - 1].song.title === '观众点的歌1',
+      `待播 [${engine.queue.items.map((i) => i.song.title).join(',')}]`);
+    ok('被顶掉的闲时曲仍不进「已播放」',
+      !engine.history.some((h) => h.song.title === idling),
+      `已播放 [${engine.history.map((h) => h.song.title).join(',')}]`);
+
+    // ---- 场景 6：在放点歌队列里的歌（含主播自己排进来的歌单曲）→ 不打断，只排队
+    resetQueue();
+    engine.history.length = 0;
+    engine.recentPlayed.length = 0;
+    engine.config.savedPlaylist = names.map((_, i) => ({ song: mkSong(i) }));
+    engine.config.idle = { enabled: true, source: 'saved', shuffle: false, avoidRecent: 0 };
+    engine.queueSaved();
+    await engine.next();
+    await sleep(250);
+    ok('前置：在放的是从点歌队列里取出来的（playingFromQueue=true，但不是真人点播）',
+      engine.playingFromQueue === true && engine.playingOrdered === false,
+      `playingFromQueue=${engine.playingFromQueue} playingOrdered=${engine.playingOrdered}`);
+    ok('直播中手动选曲放行（在放的不是观众点的歌）',
+      engine.playSavedGuard() === null, JSON.stringify(engine.playSavedGuard()));
+    const queueFront = engine.track.title;
+    await guest(2, 'viewer-8');
+    await sleep(350);
+    ok('在放点歌队列里的歌 → 新点歌只排队，不打断',
+      engine.track.title === queueFront && engine.queue.items.some((i) => i.song.title === '观众点的歌2'),
+      `在播 ${engine.track.title}；待播 [${engine.queue.items.map((i) => i.song.title).join(',')}]`);
+
+    // ---- 场景 7：未直播时同样生效（用户说"无论何时"）
+    engine.setStreaming(false);
+    resetQueue();
+    engine.history.length = 0;
+    engine.recentPlayed.length = 0;
+    engine.config.savedPlaylist = names.map((_, i) => ({ song: mkSong(i) }));
+    engine.config.idle = { enabled: true, source: 'saved', shuffle: false, avoidRecent: 0 };
+    engine._idleSeq = null; engine._idleIdx = -1; engine._idleSeqSig = null;
+    await engine.playSaved({ from: 1 });
+    await sleep(250);
+    ok('前置：未直播 + 手动播已保存歌单在播（队列之外）',
+      engine.streaming === false && engine.playingFromQueue === false, engine.track && engine.track.title);
+    await guest(3, 'viewer-7');
+    await sleep(350);
+    ok('未直播时点歌一样立刻让位（"无论何时"）',
+      engine.track.title === '观众点的歌3', `在播 ${engine.track.title}`);
+    engine.setStreaming(true);
 
     engine.config.idle = { enabled: false };
     engine.config.savedPlaylist = [];
@@ -1284,6 +1470,59 @@ function makeAudio(file, title, artist = '测试歌手', seconds = 5) {
    *   · 静音：读写的是 `config.playback.muted`（"播放行为"段），**改完不落盘** → 重启就丢。
    * 现在统一写回 `player` 段（与 volume / deviceId 同段）。
    */
+  // ================================================================ 6l2) B站多 P
+  /**
+   * 回归（2026-09-27 用户报告）：**多 P 视频只放第一 P**。
+   *
+   * 根因：`/x/web-interface/view` 返回的 `data.cid` **恒为第一 P** 的，
+   * 而用户给的 `?p=3` 从来没被解析过 —— 于是点合集里的第 3P，放出来的是第 1P。
+   * 现在 `videoInfo` 按解析出的分P号去 `data.pages[]` 里取**那一 P** 的 cid，
+   * 引擎再把分P名一起记进 song（去重键也带分P号，见 queue.dedupeKey）。
+   *
+   * 这里把 B站 API 桩掉（不联网）：桩里给一个 3 P 的视频。
+   */
+  console.log('\n== 6l2) B站多 P：点 ?p=3 要落到第 3P ==');
+  {
+    const realVideoInfo = engine.bili.videoInfo;
+    const PARTS = ['', '第一话', '第二话', '第三话'];
+    const CIDS = [0, 10101, 20202, 30303];
+    const DURS = [0, 9, 10, 111];
+    // 桩：照真实实现的样子——**按输入里的分P号选页**
+    engine.bili.videoInfo = async (input) => {
+      const m = String(input).match(/[?&]p=(\d+)/) || String(input).match(/\s[Pp](\d+)$/);
+      const page = Math.max(1, Number((m && (m[1] || m[2])) || 1));
+      return {
+        bvid: 'BV1HP411d7Qj', aid: 111, cid: CIDS[page] || CIDS[1],
+        page, pageCount: 3, partTitle: PARTS[page] || '',
+        videoTitle: '合集总标题', title: '合集总标题', duration: DURS[page] || 9,
+        cover: '', owner: 'UP主', ownerFace: '', pubdate: 0, stat: null,
+        pages: [1, 2, 3].map((n) => ({ cid: CIDS[n], page: n, part: PARTS[n], duration: DURS[n] })),
+      };
+    };
+
+    // 先用队列里的一首歌占住播放位：这样 orderVideo 只入队，不触发联网取流
+    resetQueue();
+    enqueue(0, { uid: 'u1', uname: '甲', isAnchor: true });
+    await engine.next(); await sleep(200);
+
+    const url = 'https://www.bilibili.com/video/BV1HP411d7Qj/?spm_id_from=333.788.videopod.episodes&vd_source=abc&p=3';
+    const r3 = await engine.orderVideo(url, { uid: '1001', uname: '小明' });
+    const s3 = (engine.queue.items.find((i) => i.song.page === 3) || {}).song;
+    ok('URL 里的 ?p=3 被认出来了', !!s3, s3 ? s3.name : '没找到第 3P 的入队项');
+    ok('用的是**那一 P** 的 cid（不是第一 P 的 10101）', !!s3 && s3.cid === 30303, s3 && `cid=${s3.cid}`);
+    ok('时长取那一 P 的', !!s3 && s3.duration === 111, s3 && `duration=${s3.duration}`);
+    ok('名字里带 P 号与分P名（界面能看出点的是哪一 P）',
+      !!s3 && /P3/.test(s3.name) && /第三话/.test(s3.name), s3 && s3.name);
+    ok('入队成功（没被当成"刚点过"拒掉）', !!(r3 && r3.ok), JSON.stringify(r3 && { ok: r3.ok, reason: r3.reason }));
+
+    const r1 = await engine.orderVideo('BV1HP411d7Qj p1', { uid: '1001', uname: '小明' });
+    const hasP1 = engine.queue.items.some((i) => i.song.page === 1);
+    ok('同一视频的第 1P 与第 3P 是两首歌，互不去重', hasP1 && !!(r1 && r1.ok),
+      hasP1 ? `队列里两 P 都在：[${engine.queue.items.map((i) => 'P' + i.song.page).join(',')}]` : '第 1P 没入队');
+
+    engine.bili.videoInfo = realVideoInfo;
+    resetQueue();
+  }
   console.log('\n== 6m) 音量 / 静音写回配置 ==');
   {
     const saved = {

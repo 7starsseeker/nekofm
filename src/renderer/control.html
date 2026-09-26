@@ -69,6 +69,12 @@
   .bar:hover::before { background: #24303f; }
   .bar:hover > i { box-shadow: 0 0 6px rgba(43, 211, 255, .55); }
   ul.q { list-style: none; margin: 0; padding: 0; }
+  /*
+   * 长列表**局部滚动**（2026-09-27）：队列/已播放/已保存都可能上百条，
+   * 整页跟着一起变长的话，底部的播放器栏和歌词条就被顶得看不见了。
+   * 三种列表共用这一个类，别各写各的（原来只有后两者各写了一行内联样式）。
+   */
+  ul.q.scroll { max-height: 320px; overflow: auto; }
   ul.q li { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px dashed #1d2632; font-size: 13px; }
   ul.q li:last-child { border-bottom: 0; }
   ul.q .idx { color: var(--dim); width: 20px; text-align: right; font-variant-numeric: tabular-nums; }
@@ -97,6 +103,24 @@
   ul.q button { padding: 1px 7px; font-size: 12px; }
   .log { font-size: 12px; max-height: 180px; overflow: auto; }
   .log div { padding: 2px 0; border-bottom: 1px dashed #1a222d; }
+  /* ---------------------------------------------------------- 页面内确认框
+     替代原生 confirm()。原生确认框在 Electron 里是**系统模态窗口**，
+     关掉之后主窗口会收不到键盘输入（点歌框打字没反应，要切出去再切回来）。
+     细节见 control.js 里 confirmDialog 的注释。 */
+  .modal-mask {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(4, 7, 11, .62);
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .modal-mask[hidden] { display: none; }
+  .modal {
+    background: #121a24; border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; max-width: 560px; max-height: 70vh; overflow: auto;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, .55);
+  }
+  /* pre-wrap：确认文案里本来就用 \n 分行，不要把它们挤成一行 */
+  .modal-text { font-size: 13px; line-height: 1.75; white-space: pre-wrap; word-break: break-word; }
+  .modal-btns { margin-top: 14px; justify-content: flex-end; }
   .log .warn { color: var(--warn); } .log .error { color: var(--err); } .log .info { color: var(--dim); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .tip { font-size: 12px; color: var(--dim); line-height: 1.7; }
@@ -336,7 +360,7 @@
       <button id="btnSearch">只搜索</button>
     </div>
     <div class="row">
-      <input id="bv" type="text" placeholder="直接点 B站视频：BV 号或链接" />
+      <input id="bv" type="text" placeholder="B站视频：BV 号 / 链接（多 P 合集带 ?p=3 或写 p3）" />
       <button id="btnOrderVideo">点视频</button>
     </div>
     <!--
@@ -449,8 +473,8 @@
   <!-- 队列 -->
   <div class="card">
     <h2>当前播放列表 <span id="qCount" class="tip"></span></h2>
-    <div class="tip">点歌与「打开本地文件」一视同仁排队，<b>按顺序播放</b>。第一行是<b>正在播放</b>的那首；播完会移到「已播放」（手动切走的也算播完）。</div>
-    <ul id="queue" class="q"></ul>
+    <div class="tip">点歌与「打开本地文件」一视同仁排队，<b>按顺序播放</b>。第一行是<b>正在播放</b>的那首；播完会移到「已播放」（手动切走的也算播完）。<b>列表长了可以在框内滚动</b>，不必翻整页。</div>
+    <ul id="queue" class="q scroll"></ul>
     <div class="row" style="margin-top:8px">
       <button id="btnClearQ">清空队列</button>
       <span class="tip">每项可「置顶」或直接拉黑（拉黑会同时把它撤下队列）</span>
@@ -460,7 +484,7 @@
   <!-- 已播放 -->
   <div class="card">
     <h2>已播放 <span id="histCount" class="tip"></span></h2>
-    <ul id="histList" class="q" style="max-height:320px;overflow:auto"></ul>
+    <ul id="histList" class="q scroll"></ul>
     <div class="row" style="margin-top:8px">
       <button id="btnClearHist">清空已播放</button>
       <span class="tip">从当前播放列表播完的（含被手动切掉的）都会到这里</span>
@@ -480,9 +504,9 @@
       <button id="btnPlaySaved" class="primary">播放已保存歌单</button>
       <span id="playSavedHint" class="tip">未直播时可直接播放</span>
     </div>
-    <ul id="savedList" class="q" style="max-height:320px;overflow:auto"></ul>
+    <ul id="savedList" class="q scroll"></ul>
     <div class="row" style="margin-top:8px">
-      <button id="btnQueueSaved">整份排进当前队列</button>
+      <button id="btnQueueSaved" title="把整份已保存曲目排进当前队列（正在播放的那首不会重复排 —— 它已经在放了）">整份排进当前队列</button>
       <button id="btnClearSaved">清空已保存</button>
     </div>
     <div class="row" style="margin-top:8px">
@@ -822,6 +846,16 @@
   </div>
   <div class="ls-tools">
     <button id="btnLyricClose" title="隐藏歌词条（可以随时用播放器上的「歌词」按钮再打开）">收起</button>
+  </div>
+</div>
+
+<div class="modal-mask" id="confirmMask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmText">
+    <div class="modal-text" id="confirmText"></div>
+    <div class="row modal-btns">
+      <button id="confirmCancel" class="ghost">取消</button>
+      <button id="confirmOk" class="primary">确定</button>
+    </div>
   </div>
 </div>
 
