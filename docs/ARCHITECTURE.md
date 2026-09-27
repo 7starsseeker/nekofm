@@ -125,7 +125,15 @@ Electron 默认写 `%APPDATA%`，本项目在启动时用 `app.setPath('userData
 ### 服务端安全口径
 
 `/stream/local` 与 `/stream/cover` 共用一份**白名单**
-（`LocalLibrary.streamAllowList()`）：曲库目录 + 使用者显式打开的文件 + 封面缓存目录。
+（`LocalLibrary.streamAllowList()`）：曲库目录 + 使用者显式打开的文件 +
+它们那几张侧车封面 + 封面缓存目录。
+
+白名单是**按路径逐条放行**的，所以有两条容易踩的口径：
+
+- 放行 `歌.mp3` **不等于**放行同目录的 `folder.jpg`（封面会被自己的服务端 403）。
+- 放行只存在**内存**里，而「已保存播放列表」是落盘的 —— 重启后直接播列表里的
+  本地歌会 403。所以本地曲目**取流前会把自己的文件重新登记**回去
+  （`LocalLibrary.admitFile()`，见 `Engine.resolveStream`）。
 
 不加白名单的话，`/stream/local?path=` 就是一个**任意文件读取**漏洞 ——
 直播机上的任何本地网页都能探文件。改动这一带时先看

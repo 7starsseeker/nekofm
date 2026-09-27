@@ -49,6 +49,40 @@ class LocalLibrary {
      *   2) 流媒体接口的**白名单**要放行它们（否则自己打开的文件反而播不了）
      */
     this.extraFiles = new Set();
+    /**
+     * 散装文件那几张**侧车封面**（`歌名.jpg` / `folder.jpg`）。
+     *
+     * 白名单是按**路径**逐条放行的，放行了 `歌.mp3` 并不等于放行同目录的
+     * `folder.jpg` —— 结果就是散装文件的封面请求被自己的服务端 403 挡掉，
+     * 控制台那一列全是"拒绝越界的封面请求"，歌也没有图（实测踩到）。
+     * 这里只登记**我们自己认定过的**那几张（coverFileFor 查出来的），不是整个目录。
+     */
+    this.extraCovers = new Set();
+  }
+
+  /**
+   * 把某个文件重新登记进流媒体白名单（幂等）。
+   *
+   * 为什么需要：`extraFiles` 只在**内存**里 —— 「打开文件」放行的散装文件一重启
+   * 就忘了；而「已保存播放列表」是**落盘**的。于是重开程序后从列表里点那首本地歌，
+   * 文件已不在白名单里，`/stream/local` 直接 403，播放核心只报一句没头没脑的
+   * "The element has no supported sources."（2026-09-27 用户报障）。
+   * 取流前把曲目自己的文件登记回来，这条路才闭合。
+   *
+   * 只认「存在 + 是文件 + 音频后缀」：白名单本意是挡住"随便一个路径都读"，
+   * 而这里登记的是**引擎自己正在播的曲目**（路径来自曲目对象，是用户自己挑过的
+   * 文件），不是外部请求塞进来的路径。
+   *
+   * @returns {boolean} 是否可读（false = 文件没了 / 不是音频，调用方应据此报错）
+   */
+  admitFile(file) {
+    if (!file) return false;
+    try {
+      if (!AUDIO_EXT.has(path.extname(file).toLowerCase())) return false;
+      if (!fs.statSync(file).isFile()) return false;
+    } catch { return false; } // 不存在 / 无权限
+    this.extraFiles.add(file);
+    return true;
   }
 
   // ---------------------------------------------------------------- 扫描
@@ -272,9 +306,9 @@ class LocalLibrary {
     }
   }
 
-  /** 流媒体白名单：曲库目录 + 用户显式打开的文件 + 封面缓存目录 */
+  /** 流媒体白名单：曲库目录 + 用户显式打开的文件 + 侧车封面 + 封面缓存目录 */
   streamAllowList() {
-    return [...this.dirs, ...this.extraFiles, this.coverDir].filter(Boolean);
+    return [...this.dirs, ...this.extraFiles, ...this.extraCovers, this.coverDir].filter(Boolean);
   }
 
   // ---------------------------------------------------------------- 封面
@@ -291,7 +325,12 @@ class LocalLibrary {
     if (!file) return null;
     if (this._coverCache.has(file)) return this._coverCache.get(file);
     const found = this._findSidecarCover(file);
-    if (found) { this._coverCache.set(file, found); return found; }
+    if (found) {
+      this._coverCache.set(file, found);
+      // 侧车封面也要进白名单（见 extraCovers 的注释：封面接口与音频接口同一份白名单）
+      this.extraCovers.add(found);
+      return found;
+    }
     return null;
   }
 

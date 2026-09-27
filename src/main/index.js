@@ -976,11 +976,13 @@ app.whenReady().then(async () => {
         resumeAt: st === 'playing' ? engine.playback.position : 0,
       };
     },
-    // 本地音频与封面只允许读「曲库目录 + 用户显式打开的文件 + 封面缓存」，
-    // 防止 /stream/local 与 /stream/cover 变成任意文件读取
+    // 本地音频与封面只允许读「曲库目录 + 用户显式打开的文件 + 它们那几张侧车封面 +
+    // 封面缓存」，防止 /stream/local 与 /stream/cover 变成任意文件读取
     allowRootsProvider: () => [
       ...(engine.config.local.dirs || []),
       ...(engine.local.extraFiles ? [...engine.local.extraFiles] : []),
+      // 侧车封面（歌名.jpg / folder.jpg）：只放行我们自己认定过的那几张，不是整个目录
+      ...(engine.local.extraCovers ? [...engine.local.extraCovers] : []),
       path.join(DATA_DIR, 'covers'),
       engine.cache.cacheDir,   // 媒体缓存也要放行，否则缓存的文件自己播不了
     ],

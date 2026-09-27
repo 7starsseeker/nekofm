@@ -6,6 +6,7 @@
  *   2) 歌词三来源：同名 .lrc → 翻译 .trans.lrc → 内嵌 lyrics 标签
  *   3) 引擎解析本地曲目 → /stream/local?path= → Range 拖动 206
  *   4) 本地曲目没歌词时，按歌名去网易云匹配
+ *   5) 「已保存播放列表」里落盘的本地曲目，重开程序后仍要能取到流（白名单是内存态）
  */
 'use strict';
 
@@ -126,11 +127,13 @@ function makeAudio(file, { seconds = 8, meta = {} } = {}) {
     sharedDir: path.join(__dirname, '..', 'src', 'shared'),
     getState: () => engine.state(),
     getLyrics: () => engine.lyricsPayload(),
-    // 白名单：曲库目录 + 显式打开的文件 + 封面缓存 —— 与生产接线保持一致，
+    // 白名单：曲库目录 + 显式打开的文件 + 它们自己的侧车封面 + 封面缓存
+    // —— 与生产接线（src/main/index.js）保持一致，
     // 否则这个测试里的安全校验会因为白名单为空而被跳过（等于没测）
     allowRootsProvider: () => [
       ...(engine.config.local.dirs || []),
       ...(engine.local.extraFiles ? [...engine.local.extraFiles] : []),
+      ...(engine.local.extraCovers ? [...engine.local.extraCovers] : []),
       path.join(os.tmpdir(), 'nekofm-covers-test'),
       path.join(os.tmpdir(), 'nekofm-cache-test'),
     ],
@@ -249,7 +252,59 @@ function makeAudio(file, { seconds = 8, meta = {} } = {}) {
     ok('文件已删除后打开被拒', !gone.ok, gone.msg);
   }
 
-  console.log('\n== 6) 本地歌词匹配的相似度闸（防配错歌词） ==');
+  console.log('\n== 6) 「已保存播放列表」里的本地文件（重开程序后仍要能播） ==');
+  {
+    /**
+     * 复现 2026-09-27 的报障：播「已保存播放列表」里的本地歌，播放器只报
+     *   「播放被拒：The element has no supported sources.」
+     *
+     * 链条：用「打开文件」随手打开的散装文件，只被登记进**内存**白名单
+     * （`extraFiles`）；而这份歌单是**落盘**的。重开程序后白名单是空的，
+     * `/stream/local` 对它就 403，媒体元素拿不到源 —— 报的就是上面那句话。
+     *
+     * 所以这里的复现姿势是：**清掉 extraFiles＝模拟"重启过"**，再走一遍
+     * 从列表播放的路径。断言必须落在"流接口真能读出音频字节"上 ——
+     * 只看 `engine.streamUrl` 非空是绿的（403 的地址照样是个非空字符串）。
+     */
+    const file = path.join(os.tmpdir(), 'nekofm-saved-list-song.mp3');
+    makeAudio(file, { seconds: 5, meta: { title: '歌单里的本地歌', artist: '外部歌手' } });
+    // 配一份侧车歌词：不然歌词会去联网匹配，离线用例不该依赖外网
+    fs.writeFileSync(path.join(os.tmpdir(), 'nekofm-saved-list-song.lrc'), '[00:01.00]第一句\n', 'utf8');
+
+    const addr = (f) => `http://127.0.0.1:${port}/stream/local?path=${encodeURIComponent(f)}`;
+
+    engine.local.extraFiles.clear();   // ← 重启后：内存白名单是空的
+    engine.config.savedPlaylist = [{
+      song: { source: 'local', file, name: '歌单里的本地歌', title: '歌单里的本地歌' },
+      uid: 'local', uname: '本地打开', requestedAt: Date.now(),
+    }];
+
+    const before2 = await fetch(addr(file));
+    ok('未播放前：白名单外的文件仍被拒（403）', before2.status === 403, 'HTTP ' + before2.status);
+
+    const r6 = await engine.playSaved({ from: 1 });
+    ok('从「已保存播放列表」播放本地曲目', r6.ok, r6.ok ? `第 ${r6.from}/${r6.total} 首：${r6.playing}` : r6.msg);
+    await sleep(300);
+    ok('取流时把文件登记回了白名单', engine.local.extraFiles.has(file));
+
+    const after2 = await fetch(engine.streamUrl);
+    ok('播放地址真的能读出音频（200）', after2.status === 200, 'HTTP ' + after2.status);
+    const buf2 = Buffer.from(await after2.arrayBuffer());
+    ok('拿到音频字节（不是空流）', buf2.length > 5000, buf2.length + ' 字节');
+
+    // 文件真的没了的时候：要给出人话，而不是把必然 403 的地址丢给播放核心
+    const gone = await engine.resolveStream({
+      source: 'local', file: path.join(os.tmpdir(), 'nekofm-已删除的歌.mp3'), name: '已删除的歌',
+    });
+    ok('文件不存在时取流给出明确原因', gone.ok === false && /不可读/.test(gone.msg), gone.msg);
+
+    // 收尾：别给用户（或下一轮测试）留东西
+    try { fs.unlinkSync(file); } catch { /* 忽略 */ }
+    try { fs.unlinkSync(path.join(os.tmpdir(), 'nekofm-saved-list-song.lrc')); } catch { /* 忽略 */ }
+    engine.local.extraFiles.delete(file);
+  }
+
+  console.log('\n== 7) 本地歌词匹配的相似度闸（防配错歌词） ==');
   {
     // 实测过：本地文件叫「示例曲目2」时，网易云模糊搜索也能返回一首不相干的歌
     // 外加 55 行歌词 —— 配错歌词比没有歌词更糟，所以要有这道闸。
@@ -263,7 +318,7 @@ function makeAudio(file, { seconds = 8, meta = {} } = {}) {
     ok('空标题 → 0', sim('', '孤勇者') === 0 && sim('孤勇者', '') === 0);
   }
 
-  console.log('\n== 7) 匹配到的歌词落到歌曲旁边（旁车文件） ==');
+  console.log('\n== 8) 匹配到的歌词落到歌曲旁边（旁车文件） ==');
   {
     const { buildTimeline, timelineToLrc, parseLrc } = require('../src/core/lyrics/lrc');
     const box = path.join(DIR, 'sidecar');

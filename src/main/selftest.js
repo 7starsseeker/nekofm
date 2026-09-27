@@ -1036,6 +1036,51 @@ class SelfTest {
               detail: `打开前=${outside.status}(期望403) 打开=${opened.ok ? '成功' : opened.msg} 打开后=${allowedAfter ? 200 : '被拒'}`,
             };
           } },
+          { id: 'localSavedPlayback', name: '白名单是内存态 → 取流前必须重新登记（源码级+行为）', run: async () => {
+            /**
+             * 为什么钉它（2026-09-27 用户报障）：用「打开文件」随手打开的散装文件，
+             * 只被登记进**内存**白名单；而「已保存播放列表」是**落盘**的 ——
+             * 重开程序后从列表里点那首本地歌，文件已不在白名单里，
+             * `/stream/local` 直接 403，播放核心只报一句没头没脑的
+             * "The element has no supported sources."。
+             *
+             * 断言落在「流接口真能读出字节」上：只查 `resolveStream` 返回 ok 是绿的
+             * —— 403 的地址也是个合法 URL（实测：去掉修复后，"返回 ok"那条照样绿）。
+             */
+            let src = '';
+            try { src = fs.readFileSync(path.join(__dirname, 'engine.js'), 'utf8'); }
+            catch { return { ok: false, detail: '读不到 main/engine.js' }; }
+            // 源码级：本地取流分支里必须出现登记调用（重构时被删掉就会亮红）
+            const wired = /this\.local\.admitFile\(song\.file\)/.test(src);
+            if (!wired) return { ok: false, detail: '本地取流分支里没有 admitFile(...) 登记调用' };
+
+            const { execFileSync } = require('node:child_process');
+            const tmp = path.join(os.tmpdir(), `nekofm-selftest-saved-${Date.now()}.mp3`);
+            try {
+              execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3',
+                '-c:a', 'libmp3lame', '-b:a', '96k', '-metadata', 'title=自检·歌单本地曲目', tmp], { timeout: 20000 });
+            } catch {
+              return { skip: true, detail: 'ffmpeg 不可用，无法生成测试音频' };
+            }
+            try {
+              e.local.extraFiles.delete(tmp);   // 模拟"重启过"：内存白名单是空的
+              // 手拼地址（不能走 resolveStream —— 它会把文件登记回来，就测不到"未登记"的原始状态）
+              const raw = base + '/stream/local?path=' + encodeURIComponent(tmp);
+              const blocked = (await fetch(raw)).status;
+              const st = await e.resolveStream({ source: 'local', file: tmp, name: '自检·歌单本地曲目' });
+              const served = st.ok ? (await fetch(st.url)).status : 0;
+              return {
+                ok: blocked === 403 && st.ok && served === 200 && e.local.extraFiles.has(tmp),
+                detail: `未登记时=${blocked}(期望 403)，取流后=${served}(期望 200)；`
+                  + `登记回白名单=${e.local.extraFiles.has(tmp)}`,
+              };
+            } finally {
+              // 收尾：别污染用户的曲库 / 白名单
+              try { fs.unlinkSync(tmp); } catch { /* 忽略 */ }
+              e.local.extraFiles.delete(tmp);
+              e.local.tracks = e.local.tracks.filter((t) => t.file !== tmp);
+            }
+          } },
           { id: 'localFolder', name: '打开文件夹加入曲库（可撤回）', run: async () => {
             const dir = path.join(os.tmpdir(), `nekofm-selftest-dir-${Date.now()}`);
             fs.mkdirSync(dir, { recursive: true });

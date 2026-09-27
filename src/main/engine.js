@@ -2542,8 +2542,22 @@ class Engine extends EventEmitter {
         this.playback = { ...this.playback, status: 'error', error: stream.msg };
         this.notify('error', `《${song.name || song.title}》：${stream.msg}`);
         this.emit('change');
-        // 自动跳到下一首，避免卡死队列
-        setTimeout(() => this.next().catch(() => {}), 1200);
+        /**
+         * 自动跳到下一首，避免卡死队列 —— 但**必须先确认自己没有过期**。
+         *
+         * 这个定时器原来是无条件的：只要 1.2 秒内用户自己又选了一首（或者上一次
+         * 失败刚跳出下一首），它照样会把 `next()` 再执行一遍，把用户刚点的那首直接
+         * 盖过去。用户明确要求过"本地控制一定要实时响应"，这种"点了没反应/点了被抢"
+         * 正是最难受的一类。
+         *
+         * 加 `seq` 判断后：这段时间里只要发生过新的载入（`_loadSeq` 变了），这次的
+         * 自动跳歌就作废 —— 新的那次载入自己成功与否，由它自己负责。
+         * 顺带也止住了"连续失败 → 一堆定时器同时跳歌"的连锁。
+         */
+        setTimeout(() => {
+          if (seq !== this._loadSeq) return;
+          this.next().catch(() => { /* 跳歌失败交给下一次 */ });
+        }, 1200);
         return;
       }
       if (stream.trial) {
@@ -2670,6 +2684,30 @@ class Engine extends EventEmitter {
     }
 
     if (song.source === 'local') {
+      /**
+       * 本地曲目：**取流前把文件重新登记进白名单**（幂等，见 LocalLibrary.admitFile）。
+       *
+       * 为什么必须：散装文件的放行只存在内存（`extraFiles`），而「已保存播放列表」
+       * 是**落盘**的 —— 重开程序后从列表里点那首本地歌，文件已不在白名单里，
+       * `/stream/local` 直接 403，播放核心那边只报一句没头没脑的
+       * "The element has no supported sources."（2026-09-27 用户报障）。
+       *
+       * 预载命中的那条路（上面的 `_takePreload`）不用担心漏登记：预载本身也是走
+       * 这个方法算出来的地址，登记在那时就已经做过了。
+       *
+       * 文件真没了时也在这里拦住 —— 宁可报「本地文件不可读（路径）」，
+       * 也不要再把一个必然 403 的地址丢给播放核心（那样只有一句媒体错误，
+       * 排查时完全看不出是哪一环断的）。
+       *
+       * 登记与校验**只对带 `file` 的曲目做**：「`source:'local'` 但没有 `file`」这种
+       * 形状在生产里不存在（每条本地曲目都经 `LocalLibrary.probe` 探过，必带 file），
+       * 只有自检/单测里那些纯记账用的假曲目长这样。它们的地址照旧原样拼，
+       * 在这里判成"加载失败"没有任何好处 —— 反而会给用户点自检时留下一次
+       * 延迟 1.2 秒的自动切歌（实测踩到：`repeatMode` 自检项会因此带副作用）。
+       */
+      if (song.file && !this.local.admitFile(song.file)) {
+        return { ok: false, msg: `本地文件不可读（已移动或删除？）：${song.file}` };
+      }
       return { ok: true, url: `${this.serverBase}/stream/local?path=${encodeURIComponent(song.file)}`, trial: false };
     }
 
