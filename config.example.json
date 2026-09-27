@@ -127,6 +127,7 @@
       "position": "top-left",
       "theme": "card",
       "scale": 1,
+      "width": 360,
       "opacity": 1,
       "showCover": true,
       "showRequester": true,
