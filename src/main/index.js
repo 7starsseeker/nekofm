@@ -1343,14 +1343,44 @@ app.whenReady().then(async () => {
         })()`);
         // 字号必须真的变小了，而且缩完真的装得下（留 1px 误差）
         const fitOk = fit.fits && fit.after < fit.before;
+        /**
+         * 信息卡长文本滚动的**累积回归**：反复重渲染那一行（模拟换歌/状态广播）后，
+         * DOM 不许越滚越多。老 bug 是拆包时漏掉接缝副本 `.mq-dup`，
+         * 于是每次重渲染内容翻一倍 —— 实测 8 轮后节点 26→3328、`--mq-dur` 涨到 8561 秒，
+         * 表现就是"右边信息一直滚不出来"、再往后渲染进程被拖死、整张卡片不再刷新
+         * （用户实测报的正是这个）。这里只看"有没有增长"这一条不变量，
+         * 所以页面自己的状态广播来插一脚也不会误报（它只会把内容换短、让计数更小）。
+         */
+        const mq = await overlayWins.info.webContents.executeJavaScript(`(async () => {
+          const line2 = document.querySelector('.ib-line2');
+          const card = document.getElementById('infoBar');
+          if (!line2 || card.hidden) return null;
+          const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          let maxNodes = 0, maxDups = 0;
+          for (let i = 0; i < 6; i++) {
+            // **每轮都换文本**：内容一变，签名就变，拆包重建那条路才真的跑到
+            // （只重设同一段文本的话，签名没变会被早退拦住，等于没测到拆包）
+            document.getElementById('ibArtist').textContent = '很长的歌手名字'.repeat(6) + '·第' + i + '轮';
+            document.getElementById('ibRequester').hidden = false;
+            document.getElementById('ibRequester').textContent = '点歌：很长很长的点歌人名字';
+            window.__nekofm.applyRolling(line2);
+            await frame();
+            maxNodes = Math.max(maxNodes, line2.querySelectorAll('*').length);
+            maxDups = Math.max(maxDups, line2.querySelectorAll('.mq-dup').length);
+          }
+          return { maxNodes, maxDups, dur: line2.style.getPropertyValue('--mq-dur') || '(无)' };
+        })()`);
+        const mqOk = !!mq && mq.maxNodes <= 40 && mq.maxDups <= 1;
         const ctOk = ctOnOk && inState === true && outState === false && ctOffOk;
-        overlayCtlOk = !!off.ok && topOff && !!on.ok && topOn && !!r1.ok && !!r2.ok && same && ctOk && fitOk;
+        overlayCtlOk = !!off.ok && topOff && !!on.ok && topOn && !!r1.ok && !!r2.ok && same
+          && ctOk && fitOk && mqOk;
         overlayCtlDetail = `置顶可关=${topOff} / 可开=${topOn}；拉边命令=${!!r1.ok && !!r2.ok}；`
           + `没拖动时尺寸不变=${same}；穿越按钮开关=${ctOnOk}/${ctOffOk}；`
           // 打的是**状态值**（不是断言真假）：进入顶部那条应为 true、挪到内容区应为 false，
           // 括号里是页面自己记的那一份，两边一致才算这条链真的通
           + `顶部可点带：进顶部=${inState} / 挪到内容区=${outState}（页面侧=${pageSees}）；`
-          + `长歌词自动缩字号=${fitOk}（${fit.before}→${fit.after}px，装得下=${fit.fits}）`;
+          + `长歌词自动缩字号=${fitOk}（${fit.before}→${fit.after}px，装得下=${fit.fits}）；`
+          + `信息卡滚动不累积=${mqOk}（6 轮后最多 ${mq ? `${mq.maxNodes} 节点/${mq.maxDups} 副本/${mq.dur}` : '未测'}）`;
       } catch (e) { overlayCtlDetail = '执行失败：' + e.message; }
 
       const checks = [

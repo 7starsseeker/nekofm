@@ -929,39 +929,72 @@
    *
    * 用户要求："信息卡的显示是否可以做到左右循环滚动？目前一页显示不全的内容很多"。
    *
-   * 做法：
-   *   1. 先把上一次的包装**拆掉**，恢复成"干净的单份内容"
-   *      （否则每次重绘都会再叠一层，内容越滚越长）；
-   *   2. 量宽度：`scrollWidth <= clientWidth` 就是没溢出 → 保持静止，
-   *      短歌名不会无谓地晃；
-   *   3. 溢出时把现有子节点搬进 `.mq-run`（inline-block，宽度 = 内容），
-   *      再追加一份 `.mq-dup` 副本，动画滚 `-50%` —— 那正好是"内容 + 3em 间隔"，
-   *      首尾无缝衔接、看不出接缝；
-   *   4. 时长按长度算（约 40px/s），长歌名不会滚得飞快。
+   * 结构：`el > .mq-run > 原始内容 + .mq-dup（接缝副本）`
+   *   · `.mq-run` 是 inline-block（宽度 = 内容），末尾追加一份 `.mq-dup` 副本，
+   *     动画滚 -50%（正好"内容 + 间隔"），首尾衔接看不出接缝；
+   *   · `.rolling` 时 `text-overflow: clip` —— 滚动时不该再出现省略号；
+   *   · **必须在下一帧量宽度**：本帧刚改完文本，布局还没生效。
    *
-   * **必须在下一帧量宽度**：本帧刚改完文本，布局还没生效。
+   * 2026-09-27 修两个坑（用户实测："歌名右边的信息一直滚不出来，后来整张卡片都不刷新了"）：
+   *   1) **拆包时漏掉 `.mq-dup`**：原来只把 `.mq-run` 的子节点搬回来、把 run 删掉，
+   *      那份副本就留在原地；下次再包时它连原内容一起被克隆 —— 内容**每渲染一次翻一倍**。
+   *      实测第二行（歌手/点歌人/B站那行）8 轮后：节点 26 → 3328、`--mq-dur` 涨到 **8561 秒**
+   *      （2.4 小时），于是那行**永远滚不完**，右边的内容自然一直看不到；再往后渲染进程被拖死，
+   *      整张卡片不再刷新（切歌也不恢复，只能重载）。
+   *      歌名那行没这毛病，是因为 renderInfoBar 每次都重设它的 textContent、
+   *      顺手把整棵 mq 结构清掉了；第二行只重设**子元素**的文本，容器结构一直留着。
+   *   2) **内容没变就不重包**：滚动是 CSS animation，重建会把它拽回起点 ——
+   *      每次状态广播都从头滚，"滚不完"还有这一半原因。签名（干净文本 + 可用宽度）不变就早退。
+   *   另外副本要**去掉 id**：`.ib-line2` 里包着 #ibArtist / #ibRequester / #ibBili，
+   *   克隆一份会出现重复 id（`getElementById` 拿到哪个就说不准了）。
    */
+  /**
+   * 某个滚动元素当前**真正的内容**（不含接缝副本）—— 直接读 `textContent`
+   * 会把副本也算进去，判"文本变没变"就永远判成变了。
+   */
+  function mqText(el) {
+    if (!el) return '';
+    const run = el.querySelector(':scope > .mq-run');
+    if (!run) return el.textContent;
+    let s = '';
+    run.childNodes.forEach((n) => {
+      if (!(n.nodeType === 1 && n.classList && n.classList.contains('mq-dup'))) s += n.textContent;
+    });
+    return s;
+  }
+
   function applyRolling(el) {
     if (!el) return;
-    const oldRun = el.querySelector(':scope > .mq-run');
-    if (oldRun) {
-      while (oldRun.firstChild) el.insertBefore(oldRun.firstChild, oldRun);
-      oldRun.remove();
+    const isDup = (n) => n.nodeType === 1 && n.classList && n.classList.contains('mq-dup');
+    const run = el.querySelector(':scope > .mq-run');
+    const sig = mqText(el) + '@' + el.clientWidth;
+    // 内容与可用宽度都没变、而且结构还在 → 保持现状（重包会把滚动动画拽回起点）
+    if (run && sig === el.dataset.mqSig) return;
+
+    // 变了：先彻底拆回原样（**副本一并丢掉**，否则下次再包就是一份变两份）
+    if (run) {
+      Array.from(run.childNodes).forEach((n) => { if (!isDup(n)) el.insertBefore(n, run); });
+      run.remove();
     }
     el.classList.remove('rolling');
     el.style.removeProperty('--mq-dur');
+    el.dataset.mqSig = sig;
+
     requestAnimationFrame(() => {
       if (!el.clientWidth) return;                       // 卡片被隐藏时不折腾
+      if (el.querySelector(':scope > .mq-run')) return;  // 期间别的路径已经包过了
       if (el.scrollWidth <= el.clientWidth + 2) return;  // 没溢出 → 静止
-      const run = document.createElement('span');
-      run.className = 'mq-run';
-      while (el.firstChild) run.appendChild(el.firstChild);
+      const box = document.createElement('span');
+      box.className = 'mq-run';
+      while (el.firstChild) box.appendChild(el.firstChild);
       const dup = document.createElement('span');
       dup.className = 'mq-dup';
-      dup.innerHTML = run.innerHTML;
-      run.appendChild(dup);
-      el.appendChild(run);
-      el.style.setProperty('--mq-dur', Math.max(6, Math.round(run.scrollWidth / 40)) + 's');
+      dup.setAttribute('aria-hidden', 'true');
+      dup.innerHTML = box.innerHTML;
+      dup.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));   // 副本不带 id
+      box.appendChild(dup);
+      el.appendChild(box);
+      el.style.setProperty('--mq-dur', Math.max(6, Math.round(box.scrollWidth / 40)) + 's');
       el.classList.add('rolling');
     });
   }
@@ -996,7 +1029,13 @@
       els.ibCover.parentElement.hidden = true;
     }
 
-    els.ibName.textContent = np.name || '—';
+    /**
+     * 歌名**文本没变就别重设**：`textContent =` 会把 `.mq-run` 整棵结构拆掉，
+     * 滚动动画随之从头开始 —— 长歌名会被"每次重渲染都重头滚"卡在开头（滚不完）。
+     * 比较要用 mqText()：直接读 textContent 会把接缝副本也算进去，永远判成"变了"。
+     */
+    const nameText = np.name || '—';
+    if (mqText(els.ibName) !== nameText) els.ibName.textContent = nameText;
     els.ibArtist.textContent = np.artistText || '';
 
     // 音源角标

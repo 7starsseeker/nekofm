@@ -758,6 +758,32 @@ class SelfTest {
                 + `顺序（删行→缩字号）=${order}；字号乘了自适应系数=${inFontSize}`,
             };
           } },
+          { id: 'cardMarquee', name: '信息卡长文本滚动：拆包要清干净、内容没变不重包', run: async () => {
+            /**
+             * 2026-09-27 修的实测 bug：拆包时漏掉接缝副本 `.mq-dup`，它留在原地，
+             * 下次再包时连原内容一起被克隆 —— **每渲染一次内容翻一倍**。
+             * 第二行（.ib-line2）只重设子元素文本、容器结构一直留着，所以只有它累积：
+             * 实测 8 轮后节点 26→3328、滚动时长涨到 8561 秒（永远滚不完，右边信息看不到），
+             * 再往后渲染进程被拖死、整张卡片不再刷新（切歌也不恢复）。
+             *
+             * 守三条不变量（都是"看起来无关紧要、删掉就复发"的那类）：
+             *   · 拆包时把副本丢掉（`isDup` 判断 + 只搬回非副本节点）
+             *   · 内容签名（干净文本 + 可用宽度）没变就早退，别把滚动动画拽回起点
+             *   · 克隆副本要去掉 id（`.ib-line2` 里包着 #ibArtist 这些，重复 id 会让
+             *     `getElementById` 拿到哪个说不准）
+             * 行为那一半在冒烟里验（真窗口反复重渲染，看节点数会不会涨）。
+             */
+            const js = await (await fetch(base + '/assets/overlay.js')).text();
+            const dropDup = /Array\.from\(run\.childNodes\)\.forEach[\s\S]{0,80}?isDup\(n\)\)\s*el\.insertBefore/.test(js);
+            const sigEarlyOut = /dataset\.mqSig/.test(js) && /function mqText\s*\(/.test(js);
+            const stripIds = /dup\.querySelectorAll\('\[id\]'\)\.forEach[\s\S]{0,60}?removeAttribute\('id'\)/.test(js);
+            const nameGuarded = /mqText\(els\.ibName\)\s*!==\s*nameText/.test(js);
+            return {
+              ok: dropDup && sigEarlyOut && stripIds && nameGuarded,
+              detail: `拆包丢副本=${dropDup}；签名早退=${sigEarlyOut}；副本去 id=${stripIds}；`
+                + `歌名文本没变不重设=${nameGuarded}`,
+            };
+          } },
           { id: 'controlDom', name: '控制台含本地音乐入口与各功能面板', run: async () => {
             const html = await (await fetch(base + '/')).text();
             const need = [

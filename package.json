@@ -1,6 +1,6 @@
 {
   "name": "nekofm",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "B站直播用音乐播放 + 实时歌词系统（网易云 / 本地 / B站弹幕点歌 / 直播姬歌词叠加层）",
   "license": "Apache-2.0",
