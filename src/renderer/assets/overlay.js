@@ -54,10 +54,41 @@
 
   // ---------------------------------------------------------------- 预览窗工具条
   /**
+   * 当前窗口对应哪种预览模式。
+   * **必须带上自己的模式**：三种预览窗共用同一个页面，不带的话在"歌词预览"里点关闭
+   * 会去关"整体预览"那个窗口 —— 看起来就是"点了没反应"。
+   */
+  const MY_MODE = (ONLY === 'lyrics' || ONLY === 'info') ? ONLY : 'both';
+
+  /**
+   * 统一走 /api/command（同源）让主进程做事。
+   * 失败返回 null（窗口正在关 / 服务刚重启都可能这样），由调用方决定怎么回退 ——
+   * 不要在这里抛，工具条上的按钮不该因为一次网络抖动就报错。
+   */
+  async function postCommand(body) {
+    try {
+      const r = await fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return await r.json();
+    } catch { return null; }
+  }
+
+  /**
    * Electron 的叠加层预览窗是无边框的（没有系统标题栏/关闭按钮），
    * 不给入口用户就关不掉 —— 实测被吐槽过。
    * 只有 ?preview=1 才启用；直播姬的浏览器源不带该参数，
    * 所以正式画面里不会出现这条工具条。
+   *
+   * 工具条上除「重新加载 / 关闭预览」外还有三个开关（用户要求，目的是把预览窗
+   * 当**桌面上固定的歌词栏 / 信息卡片**用）：
+   *   · 置顶          激活后固定压在最上层；关掉就是普通窗口，会被别的窗口盖住
+   *   · 自动隐藏标题栏 激活后窗口一**失去焦点**就把整条藏起来，只剩内容
+   *   · 点击穿越      激活后整块窗口不吃鼠标（点击落到下面的程序上），
+   *                   只留顶边一条可点 —— 点它窗口拿到焦点，工具条就回来了
+   * 窗口大小的调整见 initResizeGrips()。
    */
   function initPreviewBar() {
     if (QS.get('preview') !== '1') return;
@@ -65,24 +96,169 @@
     if (!bar) return;
     bar.hidden = false;
     document.body.classList.add('preview-mode');
-    // 走 /api/command（同源），由主进程隐藏窗口
-    const post = (body) => fetch('/api/command', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }).catch(() => { /* 忽略 */ });
 
     /**
-     * **必须带上自己的模式**。
-     * 三种预览窗共用同一个页面，如果不带 mode，在"歌词预览"里点关闭
-     * 会去关"整体预览"那个窗口 —— 看起来就是"点了没反应"。
+     * 工具条**实测**多高 → 写成 CSS 变量，让画布整体让开这一条
+     * （overlay.css 里 `body.preview-mode .overlay-canvas { top: var(--preview-bar-h) }`）。
+     * 为什么不在 CSS 里写死像素：按钮的字号/行高/DPI 一变高度就跟着变，
+     * 写死迟早又压住内容 —— 这也正是上一版那条"让位"规则失效的原因之一。
      */
-    const MY_MODE = (ONLY === 'lyrics' || ONLY === 'info') ? ONLY : 'both';
-    const release = (e) => {
-      if (e) e.preventDefault();
-      post({ action: 'hideOverlayWindow', mode: MY_MODE });
+    const setBarHeight = () => {
+      // 自动隐藏把工具条藏起来时 offsetHeight 是 0，别把画布顶到窗口最上面去
+      if (document.body.classList.contains('bar-hidden')) return;
+      document.documentElement.style.setProperty('--preview-bar-h', bar.offsetHeight + 'px');
+    };
+    setBarHeight();
+    window.addEventListener('resize', setBarHeight);
+
+    const topBtn = document.getElementById('pbTop');
+    const autoBtn = document.getElementById('pbAuto');
+    const ctBtn = document.getElementById('pbCt');
+    /**
+     * 三个开关的状态从地址栏读、变化后写回地址栏（syncUrl）。
+     * 为什么落在 URL 上：工具条上的「重新加载」就是 location.reload()，
+     * 状态只存在内存里的话，一重载开关全部打回默认值 —— 用户会以为"这开关不管用"。
+     * 初始值由主进程生成 URL 时给（见 createOverlayWindow），默认：置顶开、其余两个关。
+     */
+    let topOn = QS.get('top') !== '0';
+    let autoHide = QS.get('autohide') === '1';
+    let ctOn = QS.get('ct') === '1';
+
+    const syncUrl = () => {
+      const u = new URL(location.href);
+      u.searchParams.set('top', topOn ? '1' : '0');
+      u.searchParams.set('autohide', autoHide ? '1' : '0');
+      u.searchParams.set('ct', ctOn ? '1' : '0');
+      history.replaceState(null, '', u);
     };
 
+    // ------------------------------------------------------------ 置顶开关
+    const paintTop = () => {
+      if (!topBtn) return;
+      topBtn.setAttribute('aria-pressed', topOn ? 'true' : 'false');
+      topBtn.title = topOn
+        ? '置顶：已固定在最上层（点击取消，之后会被别的窗口盖住）'
+        : '置顶：点击后固定在最上层，不被其它窗口盖住';
+    };
+    paintTop();
+    if (topBtn) {
+      topBtn.addEventListener('click', async () => {
+        const want = !topOn;
+        const r = await postCommand({ action: 'setOverlayTop', mode: MY_MODE, on: want });
+        // 以主进程回执为准：headless / 窗口已销毁时它不会照办，那按钮也别点亮
+        const got = (r && r.result && typeof r.result.on === 'boolean') ? r.result.on : topOn;
+        topOn = got; paintTop(); syncUrl();
+      });
+    }
+
+    // -------------------------------------------------------- 点击穿越开关
+    /**
+     * 开了之后**整块窗口不吃鼠标**（点击落到下面的程序上），只留"顶部那一条"可点：
+     * 工具条可见时就是工具条本身，藏起来时是顶边那条 14px 感应带。
+     *
+     * 留这一条是必需的：整窗透传又没有任何可点区域的话，用户就再也点不回工具条了。
+     * 反过来，光标的悬停**不**用来唤出工具条（见 syncBar）—— 穿越时鼠标扫过顶边
+     * 不该打扰你，**点一下**才把工具条叫回来（窗口拿到焦点，工具条自然回来）。
+     *
+     * 真正让窗口透传的是主进程 `setIgnoreMouseEvents(true, { forward: true })`；
+     * **什么时候该忽略由页面说了算** —— 主进程看不见光标在哪，页面看得见：
+     * 透传状态下普通鼠标事件没了，靠的是 forward 转发过来的移动事件。所以这里只在
+     * "光标进出顶部那一条"时上报一次（不是每帧都发）。
+     */
+    const HOT_H = 14;      // 与 CSS 里 .pb-hot 的高度一致
+    let topOver = false;   // 光标是不是在"顶部那一条"里
+    let lastY = -1;        // 最近一次看到的光标 y
+    /** 顶部可点带的高度：工具条可见时是它本身，藏起来时是那条感应带 */
+    const topBandH = () => (document.body.classList.contains('bar-hidden') ? HOT_H : bar.offsetHeight);
+    const syncRegion = (force) => {
+      if (!ctOn && !force) return;   // 没开穿越就别去打扰主进程
+      const over = lastY >= 0 && lastY < topBandH();
+      if (!force && over === topOver) return;
+      topOver = over;
+      // 留个诊断痕迹：页面这边认为的"在不在顶部那条"（与主进程那份应当一致，
+      // 排查"开了穿越点不动"时，两边一比就知道是页面没上报还是主进程没生效）
+      document.documentElement.dataset.topOver = over ? '1' : '0';
+      postCommand({ action: 'overlayPointerRegion', mode: MY_MODE, over });
+    };
+    const paintCt = () => {
+      document.body.classList.toggle('ct-on', ctOn);
+      if (!ctBtn) return;
+      ctBtn.setAttribute('aria-pressed', ctOn ? 'true' : 'false');
+      ctBtn.title = ctOn
+        ? '点击穿越：已开启（整块窗口不吃鼠标；顶边仍留一条可点，点它可把工具条叫回来）'
+        : '点击穿越：开启后鼠标点击直接落到下面的程序上（顶边留一条可点，用来唤回工具条）';
+    };
+    paintCt();
+    if (ctBtn) {
+      ctBtn.addEventListener('click', async () => {
+        const want = !ctOn;
+        const r = await postCommand({ action: 'setOverlayClickThrough', mode: MY_MODE, on: want });
+        ctOn = (r && r.result && typeof r.result.on === 'boolean') ? r.result.on : ctOn;
+        paintCt(); syncUrl(); syncBar();
+        /*
+          再报一次"光标在不在顶部那条里"。这一下点击刚落在工具条上 ——
+          光标**就在**那一条里，所以直接报 true：若等下一次鼠标移动，
+          光标不动时就没人报，窗口会先切成透传，把这之后的点击全放过去。
+        */
+        topOver = true;
+        postCommand({ action: 'overlayPointerRegion', mode: MY_MODE, over: true });
+      });
+    }
+    // 光标进出"顶部那一条"时上报。两种事件都听：普通模式下是 mousemove/pointermove，
+    // 透传模式下页面收到的是主进程转发过来的移动事件（哪一种都得接住）
+    const trackPointer = (e) => { lastY = e.clientY; syncRegion(false); };
+    window.addEventListener('mousemove', trackPointer);
+    window.addEventListener('pointermove', trackPointer);
+
+    // -------------------------------------------------- 自动隐藏标题栏开关
+    /**
+     * 只在**失去焦点**时藏（用户要求）：鼠标移开不算 —— 否则拖完窗口手一挪
+     * 工具条就没了，想连点两下都难。藏起来之后有两种方式唤回：
+     *   · 鼠标碰窗口顶边那 14px 感应带（#pbHot）
+     *   · 点一下窗口任意处（窗口拿到焦点）
+     * **但开了「点击穿越」时悬停不算**（鼠标扫过顶边不打扰你），只认点击 ——
+     * 那时整块窗口都不吃鼠标，顶边那条留着就是为了让你点回工具条。
+     */
+    let hotHover = false;   // 鼠标在顶部感应带上
+    let barHover = false;   // 鼠标在工具条本身上
+    const syncBar = () => {
+      document.body.classList.toggle('bar-hidden',
+        autoHide && !document.hasFocus() && !barHover && !(hotHover && !ctOn));
+      // 工具条藏 / 显会改变"顶部那一条"的高度，穿越模式下要跟着重报一次
+      syncRegion(false);
+    };
+    const paintAuto = () => {
+      if (!autoBtn) return;
+      autoBtn.setAttribute('aria-pressed', autoHide ? 'true' : 'false');
+      autoBtn.title = autoHide
+        ? '自动隐藏标题栏：已开启（失去焦点即隐藏，鼠标碰窗口顶边可唤回）'
+        : '自动隐藏标题栏：开启后失去焦点就把这条和所有按钮藏起来（当桌面挂件用）';
+    };
+    if (autoBtn) {
+      autoBtn.addEventListener('click', () => {
+        autoHide = !autoHide; paintAuto(); syncUrl(); syncBar();
+      });
+    }
+    bar.addEventListener('mouseenter', () => { barHover = true; syncBar(); });
+    bar.addEventListener('mouseleave', () => { barHover = false; syncBar(); });
+    const hot = document.getElementById('pbHot');
+    if (hot) {
+      hot.addEventListener('mouseenter', () => { hotHover = true; syncBar(); });
+      // 移开就撤销。工具条已经盖在感应带上时这个 leave 会先于工具条的 enter 到达，
+      // 两个回调在同一个事件里跑完，最终状态仍以"鼠标在工具条上"为准，不会闪。
+      hot.addEventListener('mouseleave', () => { hotHover = false; syncBar(); });
+    }
+    // 焦点变化是这条规则的主开关
+    window.addEventListener('focus', syncBar);
+    window.addEventListener('blur', () => { hotHover = false; barHover = false; syncBar(); });
+    paintAuto();
+    syncBar();
+
+    // 走 /api/command（同源），由主进程隐藏窗口
+    const release = (e) => {
+      if (e) e.preventDefault();
+      postCommand({ action: 'hideOverlayWindow', mode: MY_MODE });
+    };
     const close = document.getElementById('pbClose');
     if (close) {
       // 只挂 click：pointerdown 会在它之后触发，会让 release() 被调两次
@@ -102,6 +278,66 @@
     }
   }
   initPreviewBar();
+  initResizeGrips();
+
+  /**
+   * 拉窗口四边 / 四角改大小。
+   *
+   * 为什么不用系统自带的：无边框窗口的缩放热区只有 4px 宽（Chromium 写死），
+   * 叠加层还是全透明的，用户既看不到边界也按不准 —— 实测反馈"拉不动"。
+   * 所以预览窗里自己铺一圈把手（见 overlay.html 的 .pb-edge），按住拖动即改大小。
+   *
+   * 几何计算放在**主进程**（用 screen.getCursorScreenPoint() 读真实光标位置）：
+   * 渲染层的 MouseEvent.screenX 在混合 DPI 下和窗口 bounds 不同源，缩放显示器上
+   * 会越拖越偏；而主进程读到的光标坐标和 win.getBounds() 属于同一坐标系。
+   * 所以这里只负责报"开始 / 正在拖 / 结束"和一个边，一次拖动里真正算几何的是主进程。
+   */
+  function initResizeGrips() {
+    if (QS.get('preview') !== '1') return;
+    if (!document.querySelector('.pb-edge')) return;
+    let edge = null;        // 正在拖的边（null = 没在拖）
+    let ticking = false;    // 一帧最多发一条：HTTP 请求别排队，排队反而更滞后
+    const send = (phase, e) => postCommand({ action: 'overlayResize', mode: MY_MODE, edge: e, phase });
+    const stop = () => {
+      if (!edge) return;
+      const was = edge;
+      edge = null;
+      document.body.classList.remove('pb-resizing');
+      send('end', was);
+    };
+    document.querySelectorAll('.pb-edge').forEach((h) => {
+      /**
+       * 用 Pointer Events 而不是 mouse*：`setPointerCapture` 会让 Chromium
+       * 在底层对窗口设上鼠标捕获，于是**光标拖到窗口外面也照样收得到
+       * pointermove / pointerup**。拖边缘必然把光标拖出去（窗口跟着变大或变小），
+       * 不捕获的话拖一半就断了 —— 而且断在外面时连"松手"都收不到。
+       */
+      h.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;   // 只有左键拉大小
+        e.preventDefault();           // 别让它起文本选区/原生拖拽
+        const which = h.dataset.edge;
+        if (!which) return;
+        try { h.setPointerCapture(e.pointerId); } catch { /* 捕获不到就算了，下面的兜底还在 */ }
+        edge = which;
+        document.body.classList.add('pb-resizing');
+        send('start', which);
+      });
+    });
+    // 监听挂在 window 上：捕获后的事件也是从被捕获的元素冒泡上来的，两种情形都收得到
+    window.addEventListener('pointermove', () => {
+      if (!edge || ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        if (edge) send('move', edge);
+      });
+    });
+    // 松手 / 被系统打断 / 窗口失焦都算结束。丢一次 end 也不致命：主进程只在下一条
+    // move 到达时才动窗口，而鼠标松开后不会再有 move —— 不会出现"跟着手一直变大"。
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+    window.addEventListener('blur', stop);
+  }
 
   const els = {
     root: document.body,

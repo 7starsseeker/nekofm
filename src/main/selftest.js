@@ -648,15 +648,86 @@ class SelfTest {
               detail: `已无逐字残留=${gates}；翻译行=${trans}；节点=${dom}；外观跟随=${style}；签名覆盖外观=${sigCovers}`,
             };
           } },
-          { id: 'previewBar', name: '叠加层预览窗有可关闭的入口', run: async () => {
-            // 无边框窗口没有系统关闭按钮，必须自带入口（实测被吐槽过）
+          { id: 'previewBar', name: '叠加层预览窗有可关闭的入口与工具条开关', run: async () => {
+            /**
+             * 无边框窗口没有系统关闭按钮，必须自带入口（实测被吐槽过）。
+             * 工具条上还有「置顶」「自动隐藏标题栏」两个开关，窗口一圈还有拉边改尺寸的把手
+             * —— 这三样**只在 ?preview=1 下生效**，而直播姬的浏览器源加载的是同一个页面，
+             * 所以顺带查一道门控：JS 里两条都必须先判 preview、CSS 里把手必须挂在
+             * body.preview-mode 下，否则正式画面里会多出一圈看不见的热区（挡住点击）。
+             */
             const html = await (await fetch(base + '/overlay?preview=1')).text();
-            const qs = await (await fetch(base + '/overlay')).text();
-            const hasBar = html.includes('id="previewBar"') && html.includes('id="pbClose"');
-            const samePage = qs.includes('id="previewBar"');
+            const js = await (await fetch(base + '/assets/overlay.js')).text();
+            const css = await (await fetch(base + '/assets/overlay.css')).text();
+            const hasBar = ['id="previewBar"', 'id="pbClose"', 'id="pbTop"', 'id="pbAuto"']
+              .every((s) => html.includes(s));
+            // 四边 + 四角 = 8 个把手，少一个就说明有边拉不动
+            const grips = (html.match(/class="pb-edge pb-e-/g) || []).length;
+            const jsOk = /action: 'setOverlayTop'/.test(js) && /action: 'overlayResize'/.test(js)
+              && /bar-hidden/.test(js);
+            const cssGate = /body\.preview-mode[^{]*\.pb-edge\s*\{[^}]*pointer-events: auto/.test(css)
+              && /body\.bar-hidden \.pb-hot/.test(css);
             return {
-              ok: hasBar && samePage,
-              detail: `预览参数下有工具条=${hasBar}；同一页面（直播姬不带参数时不显示）=${samePage}`,
+              ok: hasBar && grips === 8 && jsOk && cssGate,
+              detail: `工具条与开关按钮=${hasBar}；拉边把手=${grips}/8；`
+                + `JS 接线=${jsOk}；只在预览窗生效的门控=${cssGate}`,
+            };
+          } },
+          { id: 'previewCanvas', name: '预览工具条不会压住画面内容（画布层在）', run: async () => {
+            /**
+             * 2026-09-27 修的老问题：工具条压在窗口最上面，而信息卡是 `position: absolute`
+             * （相对视口）—— 卡片头顶那一条被盖住。原来那条"让位"规则
+             * `body.preview-mode .overlay-root { padding-top: 34px }` 同时还是个**死规则**：
+             * body 自己就是 `.overlay-root`、不是它的后代，永远不匹配。
+             *
+             * 现在的做法是内容全装进 `.overlay-canvas`，预览模式下整块下移一条工具条的高度。
+             * 这条守四个不变量，缺一个就会退回"被压住"：
+             *   · HTML 里有画布层，且信息卡/歌词在它里面（工具条在它外面）
+             *   · 画布是**定位过的**（不然绝对定位的信息卡还是相对视口，白搭）
+             *   · 预览模式下确实按 CSS 变量下移
+             *   · 那个变量由页面**实测**工具条高度写入（写死像素的版本会随时间漂移）
+             */
+            const html = await (await fetch(base + '/overlay')).text();
+            const css = await (await fetch(base + '/assets/overlay.css')).text();
+            const js = await (await fetch(base + '/assets/overlay.js')).text();
+            const canvas = /class="overlay-canvas"/.test(html);
+            const wraps = /overlay-canvas[\s\S]*id="infoBar"[\s\S]*id="stage"[\s\S]*id="previewBar"/.test(html);
+            const positioned = /\.overlay-canvas\s*\{[^}]*position:\s*absolute/.test(css);
+            const shifted = /body\.preview-mode \.overlay-canvas\s*\{[^}]*top:\s*var\(--preview-bar-h/.test(css);
+            const measured = /--preview-bar-h/.test(js) && /bar\.offsetHeight/.test(js);
+            return {
+              ok: canvas && wraps && positioned && shifted && measured,
+              detail: `画布层=${canvas}；内容在画布内、工具条在外=${wraps}；画布已定位=${positioned}；`
+                + `预览下移=${shifted}；高度实测=${measured}`,
+            };
+          } },
+          { id: 'previewClickThrough', name: '点击穿越：开关 / 顶部可点带 / forward 都在', run: async () => {
+            /**
+             * 点击穿越是这一堆预览功能里最容易"开了就回不来"的一个：整窗透传之后，
+             * 只要有一环漏了，用户就再也点不回工具条（只能去控制台关）。四环都要在：
+             *   · 顶边那条可点带（工具条可见时是它本身，藏起来时是 14px 感应带）
+             *   · 主进程调 `setIgnoreMouseEvents` 时必须带 **forward: true** ——
+             *     透传后页面收不到普通鼠标事件，只有转发过来的移动事件能让它知道
+             *     "光标挪回顶边了"，从而把窗口切回可点
+             *   · 页面得有个口子上报"光标在不在那条里"（overlayPointerRegion）
+             *   · 开了穿越时拉边把手必须让开（`:not(.ct-on)`）—— 否则四边还留着一圈
+             *     看不见的热区在吃点击，用户会觉得"穿越时灵时不灵"
+             */
+            const html = await (await fetch(base + '/overlay?preview=1')).text();
+            const js = await (await fetch(base + '/assets/overlay.js')).text();
+            const css = await (await fetch(base + '/assets/overlay.css')).text();
+            let main = '';
+            try { main = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8'); }
+            catch { return { ok: false, detail: 'src/main/index.js 读不到' }; }
+            const btn = html.includes('id="pbCt"');
+            const acts = /action: 'setOverlayClickThrough'/.test(js) && /action: 'overlayPointerRegion'/.test(js);
+            const forward = /setIgnoreMouseEvents\(ignore, \{ forward: ignore \}\)/.test(main);
+            const band = /const HOT_H = 14/.test(js) && /topBandH/.test(js) && /body\.bar-hidden \.pb-hot/.test(css);
+            const gripsOff = /:not\(\.ct-on\)[^{]*\.pb-edge\s*\{[^}]*pointer-events: auto/.test(css);
+            return {
+              ok: btn && acts && forward && band && gripsOff,
+              detail: `穿越按钮=${btn}；两条命令接线=${acts}；setIgnoreMouseEvents 带 forward=${forward}；`
+                + `顶部可点带=${band}；穿越时把手让开=${gripsOff}`,
             };
           } },
           { id: 'controlDom', name: '控制台含本地音乐入口与各功能面板', run: async () => {

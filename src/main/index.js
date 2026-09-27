@@ -16,7 +16,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
-const { app, BrowserWindow, Tray, Menu, shell, session, clipboard, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, shell, session, clipboard, dialog, screen } = require('electron');
 
 const { Engine } = require('./engine');
 const { AppServer } = require('./server');
@@ -26,6 +26,7 @@ const { NeteaseBrowserFallback } = require('./sources/netease-browser');
 const { BiliBrowserSession } = require('../core/bilibili/browser');
 const { BrowserDanmakuChannel } = require('../core/bilibili/browser-channel');
 const { DEFAULT_CONFIG, deepMerge, configPath } = require('../core/config');
+const { OVERLAY_EDGES, OVERLAY_MIN, nextBounds } = require('../core/overlay-window');
 
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
 /**
@@ -408,22 +409,55 @@ const OVERLAY_SIZE = {
   lyrics: { width: 1280, height: 200 },
   info: { width: 460, height: 140 },
 };
+/**
+ * 预览窗的最小尺寸在此统一给（建窗时的 minWidth/minHeight 与拉边时的夹取，
+ * 都取 core/overlay-window.js 里那一份）：无边框窗口没有系统标题栏，
+ * 拖到极小时连工具条都放不下、也没法再拖回来。
+ */
 /** mode → BrowserWindow */
 const overlayWins = { both: null, lyrics: null, info: null };
+/**
+ * mode → 该预览窗的「置顶」开关状态（工具条上的按钮改的就是它）。
+ * **默认开**：预览窗本来就该压在其他窗口之上 —— 旧行为一直是置顶，
+ * 加上这个开关只是把"压不住 / 想让它不挡事"的两种需求都放出来。
+ * 内存态：重启回到默认，跟其它窗口级开关一致（不进 config，不该被广播同步）。
+ */
+const overlayTopOn = { both: true, lyrics: true, info: true };
+/**
+ * mode → 该预览窗的「点击穿越」开关状态（工具条上的按钮改的就是它）。
+ * 开 = 整块窗口不吃鼠标（点击落到下面的程序上），只留顶边一条可点。
+ * **默认关**：默认行为跟以前完全一样（窗口该接的点击照接），要"不挡事"的用户自己开。
+ */
+const overlayClickThrough = { both: false, lyrics: false, info: false };
+/**
+ * mode → 渲染层上报的"光标在不在顶部那一条里"（只在开了穿越时才有意义）。
+ * 为什么这个状态必须由页面给：主进程看不见光标在窗口里的位置，而窗口一旦透传，
+ * 页面就只剩 `forward` 转发过来的移动事件能用来判断 —— 那正是它上报的依据。
+ */
+const overlayTopOver = { both: false, lyrics: false, info: false };
+/** 正在进行的拉边改尺寸（一次只可能有一个；见 overlayResize） */
+let overlayDrag = null;
 
 /**
  * 创建某个模式的预览窗。
- * 关闭 = 隐藏（可再次打开）；失焦/显示时都重新置顶，避免"点一下沉下去"。
+ * 关闭 = 隐藏（可再次打开）；开着「置顶」时失焦 / 显示都重新置顶，避免"点一下沉下去"。
  */
 function createOverlayWindow(port, mode = 'both') {
   const base = server.baseUrl;   // 跟随 config.server.host（便于与 AdGuard 共存，见文件尾部说明）
   const size = OVERLAY_SIZE[mode] || OVERLAY_SIZE.both;
   // preview=1 → 页面显示工具条（无边框窗口没有系统关闭按钮）
-  // only=... → 只渲染对应的部分；直播姬的浏览器源不带 preview 所以看不到工具条
-  const q = mode === 'both' ? '?preview=1' : `?preview=1&only=${mode}`;
+  // only=...  → 只渲染对应的部分；直播姬的浏览器源不带 preview 所以看不到工具条
+  // top/ct/... → 页面上那几个开关的初始状态（页面把它们写回地址栏，重载后不丢）
+  const q = new URLSearchParams({
+    preview: '1',
+    top: overlayTopOn[mode] ? '1' : '0',
+    ct: overlayClickThrough[mode] ? '1' : '0',
+  });
+  if (mode !== 'both') q.set('only', mode);
   const win = new BrowserWindow({
     width: size.width, height: size.height,
-    transparent: true, frame: false, alwaysOnTop: true,
+    minWidth: OVERLAY_MIN.width, minHeight: OVERLAY_MIN.height,
+    transparent: true, frame: false, alwaysOnTop: overlayTopOn[mode],
     resizable: true, hasShadow: false, show: false,
     title: OVERLAY_TITLE[mode] || OVERLAY_TITLE.both,
     icon: APP_ICON,
@@ -431,11 +465,15 @@ function createOverlayWindow(port, mode = 'both') {
   });
   win.setBackgroundColor('#00000000');
   overlayWins[mode] = win;
+  // 窗口被销毁重建时，穿越开关要跟着窗口走（懒一点：光标位置等页面报）
+  applyOverlayClickThrough(mode);
   // key 用 overlay / overlay-lyrics / overlay-info，冒烟自检与诊断都按这个找
   markLoaded(mode === 'both' ? 'overlay' : 'overlay-' + mode)(win.webContents);
-  win.loadURL(base + '/overlay' + q);
+  win.loadURL(base + '/overlay?' + q.toString());
   const keepTop = () => {
     if (isQuitting || !win || win.isDestroyed()) return;
+    // 用户把「置顶」关掉了就别再抢层级，否则那个开关等于没关
+    if (!overlayTopOn[mode]) return;
     try {
       if (win.isVisible()) { win.setAlwaysOnTop(true, 'screen-saver'); win.moveTop(); }
     } catch { /* 忽略 */ }
@@ -448,12 +486,69 @@ function createOverlayWindow(port, mode = 'both') {
 }
 
 /**
+ * 「置顶」开关（预览工具条上的按钮）。
+ * 开着 = 固定压在最上层（show / 失焦都会重新压上去）；关掉 = 普通窗口，
+ * 会被别的窗口盖住 —— 把预览窗当桌面挂件用又不想它挡住别的程序时用。
+ */
+function setOverlayTop(mode, on) {
+  const m = OVERLAY_MODES.includes(mode) ? mode : 'both';
+  overlayTopOn[m] = !!on;
+  const win = overlayWins[m];
+  if (win && !win.isDestroyed()) {
+    try {
+      win.setAlwaysOnTop(overlayTopOn[m], 'screen-saver');
+      if (overlayTopOn[m] && win.isVisible()) win.moveTop();
+    } catch { /* 忽略 */ }
+  }
+  return { ok: true, mode: m, on: overlayTopOn[m] };
+}
+
+/**
+ * 预览窗拉边改尺寸：渲染进程只报「开始 / 正在拖 / 结束」和一个边（n/s/w/e + 四个角），
+ * 真正的几何计算在这里做。
+ *
+ * 为什么不把渲染层的 MouseEvent.screenX 传过来算：混合 DPI 下渲染层的屏幕坐标
+ * 与窗口 bounds 不是同一坐标系，缩放显示器上会越拖越偏。这里直接读
+ * `screen.getCursorScreenPoint()`（与 getBounds 同为 DIP），从拖拽起点算增量，稳。
+ *
+ * 拉动的过程中窗口边缘跟着光标走，所以拖动期间指针一直在动、渲染层按帧调这里 ——
+ * 没有常驻定时器，松手后不会再有 move，也就不会自己继续变大。
+ * "增量 → 新 bounds" 那段是纯函数，在 core/overlay-window.js 里（有单测）。
+ */
+function overlayResize(mode, edge, phase) {
+  const m = OVERLAY_MODES.includes(mode) ? mode : 'both';
+  const win = overlayWins[m];
+  if (!win || win.isDestroyed()) return { ok: false, msg: '预览窗不存在' };
+  if (phase === 'end') { overlayDrag = null; return { ok: true, mode: m }; }
+  if (!OVERLAY_EDGES.includes(edge)) return { ok: false, msg: '未知的边：' + edge };
+
+  const cur = screen.getCursorScreenPoint();
+  if (phase === 'start') {
+    overlayDrag = { mode: m, edge, cursor: cur, bounds: win.getBounds() };
+    return { ok: true, mode: m, edge, bounds: overlayDrag.bounds };
+  }
+  // 'move'：必须配着一个同窗口同边的 start，否则忽略（防串窗口 / 防没有起点的拖动）
+  if (!overlayDrag || overlayDrag.mode !== m || overlayDrag.edge !== edge) {
+    return { ok: false, msg: '没有正在进行的拖动' };
+  }
+  const next = nextBounds(
+    overlayDrag.bounds, edge, cur.x - overlayDrag.cursor.x, cur.y - overlayDrag.cursor.y);
+  try {
+    win.setBounds(next);
+  } catch (e) {
+    return { ok: false, msg: e.message };
+  }
+  return { ok: true, mode: m, bounds: win.getBounds() };
+}
+
+/**
  * 让叠加层预览窗显示并**稳稳压在其它窗口之上**。
  *
  * 为什么不能只靠创建时的 alwaysOnTop:true：
  * 窗口隐藏再显示后，Windows 可能丢掉 topmost 标记；点一下它拿到焦点、
  * 随后又失去焦点时就掉到下层去了（用户反馈"点了自己就跑到下层"）。
  * 所以：显示前先设 topmost，显示后再补一次，并且失焦时自动重新置顶。
+ * **但「置顶」被用户关掉时这一整套都不做** —— 那时它就是普通窗口，会正常被盖住。
  */
 function presentOverlay(mode = 'both') {
   if (!OVERLAY_MODES.includes(mode)) mode = 'both';
@@ -463,14 +558,15 @@ function presentOverlay(mode = 'both') {
     const port = (server && server.boundPort) || 37821;
     win = createOverlayWindow(port, mode);
   }
+  const top = overlayTopOn[mode];
   try {
-    win.setAlwaysOnTop(true, 'screen-saver');
+    win.setAlwaysOnTop(top, 'screen-saver');
     if (!win.isVisible()) win.show();
-    win.moveTop();
+    if (top) win.moveTop();
     // 有些合成器在 show 之后才真正应用层级，补一次更保险
     setTimeout(() => {
       try {
-        if (win && !win.isDestroyed() && win.isVisible()) {
+        if (top && win && !win.isDestroyed() && win.isVisible()) {
           win.setAlwaysOnTop(true, 'screen-saver');
           win.moveTop();
         }
@@ -479,7 +575,48 @@ function presentOverlay(mode = 'both') {
   } catch (e) {
     return { ok: false, msg: e.message };
   }
-  return { ok: true, mode };
+  return { ok: true, mode, alwaysOnTop: top };
+}
+
+/**
+ * 「点击穿越」开关 + 光标位置上报（预览工具条上的按钮 / 页面的 mousemove）。
+ *
+ * 落点：`setIgnoreMouseEvents(ignore, { forward: true })`。
+ * **forward 不能省** —— 透传之后页面收不到普通鼠标事件，只有转发过来的移动事件
+ * 能让它知道"光标挪回顶边那一条了"，从而把窗口切回可点；漏了它，用户一旦开了穿越
+ * 就再也点不回工具条（只能去控制台关）。这是这个功能唯一的死路，务必留着。
+ *
+ * 忽略与否 = 开了穿越 **且** 光标不在顶部那条可点带里：
+ *   · 光标在那一条里（工具条可见时是它本身，藏起来时是 14px 感应带）→ 保持可点，
+ *     用户才能点工具条上的按钮、也才有"点一下把工具条叫回来"这条路；
+ *   · 其余时候整块透传，点击落到下面的程序上。
+ */
+function applyOverlayClickThrough(mode) {
+  const win = overlayWins[mode];
+  if (!win || win.isDestroyed()) return;
+  const ignore = !!overlayClickThrough[mode] && !overlayTopOver[mode];
+  try {
+    win.setIgnoreMouseEvents(ignore, { forward: ignore });
+  } catch (e) {
+    // 这个失败**不能静默**：窗口一旦按预期透传，页面就只剩顶边那条能点，
+    // 而那条又依赖 forward 转发 —— 出问题要能从日志里看到原因
+    console.log('[overlay] 切换点击穿越失败:', e.message);
+  }
+}
+
+function setOverlayClickThrough(mode, on) {
+  const m = OVERLAY_MODES.includes(mode) ? mode : 'both';
+  overlayClickThrough[m] = !!on;
+  // 刚点完按钮时光标就在工具条上，而"在不在顶部那条里"由页面接着报（见渲染层注释）
+  applyOverlayClickThrough(m);
+  return { ok: true, mode: m, on: overlayClickThrough[m] };
+}
+
+function setOverlayPointerRegion(mode, over) {
+  const m = OVERLAY_MODES.includes(mode) ? mode : 'both';
+  overlayTopOver[m] = !!over;
+  applyOverlayClickThrough(m);
+  return { ok: true, mode: m, over: overlayTopOver[m] };
 }
 
 /** 一键打开全部三种预览：歌词、信息卡片、整体并排对比 */
@@ -668,6 +805,11 @@ app.whenReady().then(async () => {
         return { ok: true, mode: m };
       },
       showPlayer: () => showPlayerWindow(),
+      // 预览工具条上的开关 / 拉边改尺寸 / 光标位置上报（窗口本身的属性）
+      setOverlayTop: (mode, on) => setOverlayTop(mode, on),
+      setOverlayClickThrough: (mode, on) => setOverlayClickThrough(mode, on),
+      overlayPointerRegion: (mode, over) => setOverlayPointerRegion(mode, over),
+      overlayResize: (mode, edge, phase) => overlayResize(mode, edge, phase),
       /**
        * 播放核心窗内部的真实媒体状态。
        * "没声音 / 一直 loading"这类问题，从主进程看只能看到引擎状态，
@@ -694,6 +836,13 @@ app.whenReady().then(async () => {
           overlay: w(overlayWins.both),
           overlayLyrics: w(overlayWins.lyrics),
           overlayInfo: w(overlayWins.info),
+          /**
+           * 预览窗的两个开关状态（置顶在 alwaysOnTop 里，这里只补穿越 ——
+           * Electron 没有"读回 setIgnoreMouseEvents"的接口，所以留一份自己的状态，
+           * 排查"开了穿越点不动"这类问题时从这里看）。
+           */
+          overlayClickThrough: { ...overlayClickThrough },
+          overlayTopOver: { ...overlayTopOver },
         };
       },
       playerDiag: async () => {
@@ -948,6 +1097,17 @@ app.whenReady().then(async () => {
         { label: '预览：只要信息卡片', click: () => presentOverlay('info') },
         { label: '三个预览一起打开', click: () => presentAllOverlays() },
         { label: '关闭全部预览', click: () => { for (const m of OVERLAY_MODES) { const w = overlayWins[m]; if (w && !w.isDestroyed()) w.hide(); } } },
+        /**
+         * 「点击穿越」的救生绳。
+         * 正常路径是：光标碰顶边感应带 → 页面（靠主进程 forward 转发过来的移动事件）
+         * 上报"光标在顶上" → 窗口切回可点 → 点一下工具条就回来了。
+         * 万一这条链子哪一环失灵（比如系统不给转发移动事件），窗口就从用户手里"消失"了 ——
+         * 菜单这一条能一键把三个预览窗的穿越全关掉，不用重启程序。
+         */
+        { label: '取消预览窗的「点击穿越」', click: () => {
+          for (const m of OVERLAY_MODES) { overlayClickThrough[m] = false; applyOverlayClickThrough(m); }
+          return { ok: true };
+        } },
         { type: 'separator' },
         /**
          * 打包后的 exe 没有控制台 —— 这个是唯一的"现场"入口，放在窗口菜单里最顺手。
@@ -1053,7 +1213,31 @@ app.whenReady().then(async () => {
         overlayDomOk = await ov.webContents.executeJavaScript(
           '!!(window.__nekofm && window.__nekofm.S && document.getElementById("stage"))');
         const n = await ov.webContents.executeJavaScript('document.querySelectorAll(".line").length');
-        overlayDetail = `渲染行数=${n}`;
+        /**
+         * 预览工具条：两个开关按钮 + 一圈拉边把手。
+         * 无边框窗口只有这条自带入口，它没起来就等于用户关不掉、也拉不动窗口。
+         * 顺带**量一次几何**：画布（真正给直播看的内容）必须整块落在工具条下面 ——
+         * 绝对定位的信息卡曾经被工具条压住过，这种"看着不对但没人报错"的问题
+         * 只有真窗口里的数字能证明。
+         */
+        const barOk = await ov.webContents.executeJavaScript(
+          '(() => {'
+          + ' const bar = document.getElementById("previewBar");'
+          + ' const cv = document.querySelector(".overlay-canvas");'
+          + ' if (!bar || !cv || bar.hidden) return false;'
+          + ' if (!document.getElementById("pbTop") || !document.getElementById("pbAuto")) return false;'
+          + ' if (document.querySelectorAll(".pb-edge").length !== 8) return false;'
+          + ' const b = bar.getBoundingClientRect(), c = cv.getBoundingClientRect();'
+          + ' return c.top >= b.bottom - 1;'
+          + '})()');
+        const geom = await ov.webContents.executeJavaScript(
+          '(() => {'
+          + ' const bar = document.getElementById("previewBar").getBoundingClientRect();'
+          + ' const cv = document.querySelector(".overlay-canvas").getBoundingClientRect();'
+          + ' return "工具条 0~" + Math.round(bar.bottom) + "px / 画布从 " + Math.round(cv.top) + "px 起";'
+          + '})()');
+        overlayDetail = `渲染行数=${n}；工具条开关与把手=${barOk}；${geom}`;
+        overlayDomOk = overlayDomOk && barOk;
       } catch (e) { overlayDetail = '执行 JS 失败：' + e.message; }
       try {
         controlDomOk = await winControl.webContents.executeJavaScript('!!document.getElementById("queue") && !!document.getElementById("addr")');
@@ -1086,6 +1270,69 @@ app.whenReady().then(async () => {
         logDetail = `${conn} · 日志行 ${n}`;
       } catch (e) { logDetail = '打开失败：' + e.message; }
 
+      /**
+       * 预览窗的几个新交互里，**主进程这半边**是可以脚本验的：
+       * 置顶开关真的改到了窗口属性、拉边命令链路通、点击穿越的开关与光标位置状态能翻转。
+       * 另外半边（失去焦点时工具条藏起来、按住边缘跟着鼠标改大小、点击真的穿到下层）
+       * 在渲染层 + 真实鼠标上，脚本够不到 —— 所以只验到这里为止，别把没验的说成验过了。
+       */
+      let overlayCtlOk = false;
+      let overlayCtlDetail = '';
+      try {
+        const off = await handleCommand({ action: 'setOverlayTop', mode: 'both', on: false });
+        const topOff = !overlayWins.both.isAlwaysOnTop();
+        const on = await handleCommand({ action: 'setOverlayTop', mode: 'both', on: true });
+        const topOn = overlayWins.both.isAlwaysOnTop();
+        const b0 = overlayWins.info.getBounds();
+        const r1 = await handleCommand({ action: 'overlayResize', mode: 'info', edge: 'se', phase: 'start' });
+        const r2 = await handleCommand({ action: 'overlayResize', mode: 'info', edge: 'se', phase: 'end' });
+        // 光标全程没动，尺寸就该一点没变（start 只记起点，move 才动窗口）
+        const b1 = overlayWins.info.getBounds();
+        const same = b1.width === b0.width && b1.height === b0.height;
+        /**
+         * 点击穿越：开关有回执、状态能从诊断里读到（Electron 没有"读回
+         * setIgnoreMouseEvents"的接口，所以主进程自己记一份）。
+         * 光标在不在顶部那条可点带里，也是靠渲染层上报的两个状态位。
+         * 验完**关掉** —— 免得后面检查窗口时它还处在透传状态。
+         */
+        /**
+         * 点击穿越：这次**走真实链路**，不从主进程直接调命令 ——
+         * 在页面里点「点击穿越」按钮（页面 → postCommand → 主进程），
+         * 再往页面派发鼠标移动事件，看"页面按 y 算出在不在顶部那条 → 上报 → 主进程记状态"整条通不通。
+         * 为什么用 DOM 事件而不是 sendInputEvent：后者要求窗口**聚焦**（还得真显示出来抢桌面焦点，
+         * 冒烟不该干这种事）。而这里要验的只是页面这一半；
+         * "透传时操作系统会不会真把移动事件转发过来"是系统行为，冒烟验不到（得真鼠标，见 README 第 26 条）。
+         */
+        const wBoth = overlayWins.both;
+        const clickBtn = (id) => wBoth.webContents.executeJavaScript(
+          `document.getElementById('${id}').click(), true`);
+        const fireMove = (y) => wBoth.webContents.executeJavaScript(
+          `window.dispatchEvent(new MouseEvent('mousemove', { clientY: ${Math.round(y)}, bubbles: true })), true`);
+        const diag = async () => handleCommand({ action: 'windowsDiag' });
+        const settle = () => new Promise((r) => setTimeout(r, 300));
+        await clickBtn('pbCt');
+        await settle();
+        const ctOnOk = (await diag()).overlayClickThrough.both === true;
+        await fireMove(5);          // 顶部那条可点带里（工具条 33px，藏起来时是 14px 感应带）
+        await settle();
+        const inState = (await diag()).overlayTopOver.both;
+        await fireMove(200);        // 挪到内容区 → 应该整块透传
+        await settle();
+        const outState = (await diag()).overlayTopOver.both;
+        const pageSees = await wBoth.webContents.executeJavaScript(
+          'document.documentElement.dataset.topOver');
+        await clickBtn('pbCt');     // 再点一下关掉，别把窗口留在透传状态
+        await settle();
+        const ctOffOk = (await diag()).overlayClickThrough.both === false;
+        const ctOk = ctOnOk && inState === true && outState === false && ctOffOk;
+        overlayCtlOk = !!off.ok && topOff && !!on.ok && topOn && !!r1.ok && !!r2.ok && same && ctOk;
+        overlayCtlDetail = `置顶可关=${topOff} / 可开=${topOn}；拉边命令=${!!r1.ok && !!r2.ok}；`
+          + `没拖动时尺寸不变=${same}；穿越按钮开关=${ctOnOk}/${ctOffOk}；`
+          // 打的是**状态值**（不是断言真假）：进入顶部那条应为 true、挪到内容区应为 false，
+          // 括号里是页面自己记的那一份，两边一致才算这条链真的通
+          + `顶部可点带：进顶部=${inState} / 挪到内容区=${outState}（页面侧=${pageSees}）`;
+      } catch (e) { overlayCtlDetail = '执行失败：' + e.message; }
+
       const checks = [
         ['服务器已监听', !!server.boundPort],
         ['控制台窗口已创建', !!winControl && !winControl.isDestroyed()],
@@ -1100,6 +1347,7 @@ app.whenReady().then(async () => {
         ['叠加层 JS 已初始化', overlayDomOk],
         ['控制台 DOM 就绪', controlDomOk],
         ['运行日志窗口可打开（页面 + 状态栏 + 过滤框就绪）', logWinOk],
+        ['预览窗置顶开关 / 拉边改尺寸（主进程侧）', overlayCtlOk],
         ['引擎已初始化', !!engine],
         ['网易云浏览器急兑通道可用', !!(browserFallback && browserFallback.available)],
         ['B站会话通道可用（登录后视频字幕可用）', !!(biliBrowser && biliBrowser.available)],
@@ -1110,6 +1358,7 @@ app.whenReady().then(async () => {
         if (!okk) bad++;
       }
       console.log(`[smoke] 叠加层: ${overlayDetail}`);
+      console.log(`[smoke] 预览窗交互: ${overlayCtlDetail}`);
       console.log(`[smoke] 运行日志窗口: ${logDetail}`);
       console.log(`[smoke] 播放核心: ${playerDetail}`);
       console.log(`[smoke] 结果: ${checks.length - bad}/${checks.length} 通过`);

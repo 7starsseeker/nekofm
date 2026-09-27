@@ -54,7 +54,25 @@ html, body {
   --gap: 0.35em;
 
   font-family: var(--font-family);
-  opacity: var(--opacity);
+}
+/*
+  画布：**所有会被直播姬看到的内容都在这一层里**（歌词 / 信息卡 / 占位 / 角标）。
+  工具条、感应带、拉边把手是"预览窗自己的壳"，留在画布外面。
+
+  为什么要多这一层（2026-09-27 修）：
+  预览工具条压在窗口最上面（实测 33px），而信息卡是 `position: absolute` ——
+  它原本相对**视口**定位，`top: 14px` 就是离窗口顶 14px，于是卡片的头 19px 被工具条盖住
+  （`body.preview-mode .overlay-root { padding-top: 34px }` 那条"让位"规则同时还是**死规则**：
+  body 自己就是 `.overlay-root`，不是它的后代，永远不匹配；而且就算匹配，padding 也推不动
+  绝对定位的子元素）。现在把内容装进一个**定位过的**画布，预览模式下把画布整体下移一条工具条的高度
+  —— 绝对定位的信息卡、贴底的歌词、角标就都落在"工具条以下"这块画布里了。
+
+  正式源（直播姬）里没有 preview-mode，画布就是铺满视口的 `inset: 0`，
+  和加这一层之前**逐像素一致**（信息卡的 containing block 从视口变成同样大小的画布）。
+*/
+.overlay-canvas {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
@@ -65,6 +83,12 @@ html, body {
    *  横向空间不够时，大字那行的两端就会被裁掉。2026-09-26 用户反馈）。
    */
   padding: 12px 48px 16px;
+  /*
+    整体不透明度挂在画布上（原来挂在 body 上）：预览工具条是**操作界面**，
+    不该跟着"叠加层不透明度"一起变半透明 —— 透明得看不清就没法操作了。
+    正式源里画布就是整页内容，与挂在 body 上等价。
+  */
+  opacity: var(--opacity);
 }
 
 /* ------------------------------------------------------------------ 歌词区 */
@@ -81,8 +105,8 @@ html, body {
   overflow: hidden;
 }
 
-/* 预览窗顶部的工具条会占掉一块，正文要相应下移 */
-body.preview-mode .overlay-root { padding-top: 34px; }
+/* 预览模式下：画布整体让开工具条那一条（高度由页面实测后写成 --preview-bar-h） */
+body.preview-mode .overlay-canvas { top: var(--preview-bar-h, 33px); }
 
 .lines {
   width: 100%;
@@ -378,17 +402,95 @@ body.preview-mode .overlay-root { padding-top: 34px; }
   -webkit-app-region: no-drag;
 }
 .preview-bar[hidden] { display: none; }
-.preview-bar .pb-drag { flex: 1; user-select: none; -webkit-app-region: drag; }
+.preview-bar .pb-drag {
+  flex: 1; user-select: none; -webkit-app-region: drag;
+  /* 按钮从 2 个涨到 4 个之后，窄窗（信息卡片预览只有 460px）里这行文字
+     会把工具条撑成两行高 —— 宁可截断。完整文案在 JS 里设成 title。 */
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .preview-bar button {
   -webkit-app-region: no-drag;
+  flex: 0 0 auto; white-space: nowrap;
   font: inherit; font-size: 12px; padding: 2px 10px; cursor: pointer;
   color: #cfe8f5; background: #14586b; border: 1px solid #1d7b93; border-radius: 4px;
 }
 .preview-bar button:hover { background: #1a7089; }
 .preview-bar .pb-close { background: #7a2230; border-color: #a33244; }
 .preview-bar .pb-close:hover { background: #9c2b3d; }
+/* 开关按钮：aria-pressed="true" = 已激活（置顶 / 自动隐藏标题栏），点亮成绿色 */
+.preview-bar button.pb-toggle[aria-pressed="true"] {
+  background: #1c7a4a; border-color: #2ba45f; color: #eafff3;
+}
+.preview-bar button.pb-toggle[aria-pressed="true"]:hover { background: #229056; }
 /* 预览时给个底色，否则透明窗口里看不清边界 */
 body.preview-mode { background: rgba(0, 0, 0, .35); }
+
+/* ------------------------------------------------ 自动隐藏标题栏 / 拉边改尺寸 */
+/*
+  「自动隐藏标题栏」激活后，窗口一失去焦点就挂上 body.bar-hidden = 整条工具条藏掉。
+  工具条是 fixed 定位、不占文档流，所以正文不会跟着跳（藏 / 显示之间内容不抖）。
+  这里刻意不复用 .preview-bar[hidden]：那条的语义是"这不是预览窗"，混在一起
+  以后分不清"没显示"到底是哪种原因。
+*/
+body.bar-hidden .preview-bar { display: none; }
+
+/* 唤出感应带：只在工具条藏起来时接收鼠标事件 —— 鼠标碰到窗口顶边就把工具条唤回来
+   （不然藏起来之后连「关闭预览」都没地方点）。
+   开了「点击穿越」时它是**整块窗口里唯一可点的东西**，见下面的说明。 */
+.pb-hot {
+  position: fixed; left: 0; right: 0; top: 0; height: 14px; z-index: 9998;
+  pointer-events: none; -webkit-app-region: no-drag;
+}
+body.bar-hidden .pb-hot { pointer-events: auto; }
+
+/*
+  点击穿越（body.ct-on）：
+  窗口整块**不吃鼠标**，只有"顶部那一条"是例外 —— 工具条可见时就是工具条本身，
+  工具条藏起来时就是上面那条 14px 感应带。留这一条是必须的：整窗透传又没有任何
+  可点区域的话，用户就再也点不回工具条了（只能去控制台把穿越关掉）。
+
+  真正让窗口透传的是主进程的 `setIgnoreMouseEvents(true, { forward: true })`
+  （见 src/main/index.js 的 applyOverlayClickThrough）——
+  **forward 不能省**：透传之后页面收不到普通鼠标事件，只有转发过来的移动事件能让
+  页面知道"光标挪回顶边那一条了"，从而把窗口切回可点。页面按光标的 y 坐标判断
+  （不看 :hover —— 那个在转发模式下不可靠）。也正因为这条，穿越时不按鼠标悬停
+  唤出工具条：光标扫过顶边不会打扰你，**点一下**才把工具条叫回来。
+*/
+
+/*
+  拉边改大小的把手。
+  为什么自己做：无边框窗口的系统缩放热区只有 4px（Chromium 写死），叠加层又是
+  全透明的 —— 用户看不出边界在哪，实测反馈"拉不动"。四边各 8px、四角 14px，
+  比系统热区宽得多，移上去亮一条，按住拖就改大小。
+
+  只在预览窗里可交互（直播姬的浏览器源不该多出这些看不见的热区）。
+  两种情况一律关掉：
+    · 工具条藏起来时（bar-hidden）—— 那一状态下的窗口是"纯展示"，
+      不该有任何挡点击的地方；要改大小先碰顶边把工具条唤回来。
+    · 开了「点击穿越」时（ct-on）—— 那时用户要的就是"整块窗口不吃鼠标"，
+      四边留一圈看不见的热区会让人觉得穿越时灵时不灵。想调大小先关掉穿越。
+*/
+.pb-grips { position: fixed; inset: 0; z-index: 9990; pointer-events: none; }
+.pb-edge { position: fixed; display: block; pointer-events: none; }
+body.preview-mode:not(.bar-hidden):not(.ct-on) .pb-edge { pointer-events: auto; }
+.pb-edge:hover { background: rgba(126, 231, 255, .3); }
+/* 拖动中：八条边一起亮起来，等于给窗口描一圈框 —— 透明窗口在乱背景上
+   改大小时能看清自己拉到哪儿了 */
+body.pb-resizing .pb-edge { background: rgba(126, 231, 255, .22); }
+/*
+  四个角排在四边之后：同层级后来者在上，角落才抢得到（角落与边重叠 14px）。
+  把手整体压在工具条之下（9990 < 9999）—— 工具条占着窗口最上面 28px，
+  要让那一条上的按钮和拖动区照常好点，代价是顶边 / 左上 / 右上这几个把手
+  在那一带够不着（想用它们改高度：先让工具条藏起来，或拉左 / 右 / 下边）。
+*/
+.pb-e-n  { left: 14px; right: 14px; top: 0; height: 8px; cursor: ns-resize; }
+.pb-e-s  { left: 14px; right: 14px; bottom: 0; height: 8px; cursor: ns-resize; }
+.pb-e-w  { top: 14px; bottom: 14px; left: 0; width: 8px; cursor: ew-resize; }
+.pb-e-e  { top: 14px; bottom: 14px; right: 0; width: 8px; cursor: ew-resize; }
+.pb-e-nw { left: 0; top: 0; width: 14px; height: 14px; cursor: nwse-resize; }
+.pb-e-ne { right: 0; top: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+.pb-e-sw { left: 0; bottom: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+.pb-e-se { right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize; }
 
 /* ------------------------------------------------------------ 分区显示 */
 /*
@@ -403,7 +505,7 @@ html.only-info #idle,
 html.only-info #notice { display: none !important; }
 /* 只显示信息卡时，不需要给歌词留位 */
 html.only-info .stage { margin-top: 0 !important; }
-html.only-info .overlay-root { justify-content: flex-start; padding-top: 12px; }
+html.only-info .overlay-canvas { justify-content: flex-start; padding-top: 12px; }
 
 /* --------------------------------------------------- 信息卡片长文本：循环滚动 */
 /**

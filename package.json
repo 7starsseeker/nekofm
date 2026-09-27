@@ -1,6 +1,6 @@
 {
   "name": "nekofm",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "private": true,
   "description": "B站直播用音乐播放 + 实时歌词系统（网易云 / 本地 / B站弹幕点歌 / 直播姬歌词叠加层）",
   "license": "Apache-2.0",
@@ -26,7 +26,7 @@
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
-    "test": "node test/lrc.test.js && node test/text-file.test.js && node test/queue.test.js && node test/blacklist.test.js && node test/netease-playlist.test.js && node test/local.test.js && node test/player.test.js",
+    "test": "node test/lrc.test.js && node test/text-file.test.js && node test/queue.test.js && node test/blacklist.test.js && node test/netease-playlist.test.js && node test/local.test.js && node test/player.test.js && node test/overlay-window.test.js",
     "test:e2e": "node test/e2e.test.js",
     "test:live": "node test/netease.live.js && node test/bilibili.live.js",
     "test:center": "node tools/headless.js --testcenter",

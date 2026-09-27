@@ -668,6 +668,18 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
       case 'showControlWindow': return hooks.showControl ? hooks.showControl() : { ok: false, msg: 'headless 模式无窗口' };
       case 'hideOverlayWindow': return hooks.hideOverlay ? hooks.hideOverlay(cmd.mode) : { ok: false, msg: 'headless 模式无窗口' };
       case 'showPlayerWindow': return hooks.showPlayer ? hooks.showPlayer() : { ok: false, msg: 'headless 模式无窗口' };
+      /**
+       * 预览工具条上的开关 + 拉边改尺寸 + 点击穿越。
+       * 「置顶」「点击穿越」是窗口级开关（headless 没有窗口，自然也是"无窗口"）；
+       * `overlayResize` 的 phase 是 start / move / end，见 index.js 的说明；
+       * `overlayPointerRegion` 是渲染层上报"光标在不在顶部那条可点带里"（穿越模式用）。
+       */
+      case 'setOverlayTop': return hooks.setOverlayTop ? hooks.setOverlayTop(cmd.mode, cmd.on) : { ok: false, msg: 'headless 模式无窗口' };
+      case 'setOverlayClickThrough': return hooks.setOverlayClickThrough
+        ? hooks.setOverlayClickThrough(cmd.mode, cmd.on) : { ok: false, msg: 'headless 模式无窗口' };
+      case 'overlayPointerRegion': return hooks.overlayPointerRegion
+        ? hooks.overlayPointerRegion(cmd.mode, cmd.over) : { ok: false, msg: 'headless 模式无窗口' };
+      case 'overlayResize': return hooks.overlayResize ? hooks.overlayResize(cmd.mode, cmd.edge, cmd.phase) : { ok: false, msg: 'headless 模式无窗口' };
       case 'openExternal': return hooks.openExternal ? hooks.openExternal(cmd.url) : { ok: true };
       case 'quit': return hooks.quit ? hooks.quit() : { ok: false };
 

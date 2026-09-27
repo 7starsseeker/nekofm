@@ -9,6 +9,14 @@
 </head>
 <body class="overlay-root">
   <!--
+    画布层：**所有会出现在直播画面里的东西都放这里面**（信息栏 / 歌词 / 占位 / 角标）。
+    工具条、唤出感应带、拉边把手属于"预览窗的壳"，留在画布外面 ——
+    预览模式下画布整体下移一条工具条的高度，于是绝对定位的信息卡不会被工具条压住
+    （见 overlay.css 里 .overlay-canvas 的说明）。
+    正式源（直播姬）里没有 preview-mode，画布铺满整个视口，与没有这一层时完全一致。
+  -->
+  <div class="overlay-canvas">
+  <!--
     播放器信息栏（独立模块）：封面 + 歌名 + 歌手 + 点歌者 + 进度条 + 下一首
     位置/主题/各项开关都在控制台里配，或走 config.overlay.infoBar
   -->
@@ -48,6 +56,7 @@
 
   <!-- 角标提示（点歌回执/错误），可通过 ?notices=0 关闭 -->
   <div id="notice" class="notice" hidden></div>
+  </div><!-- /画布层 -->
 
   <!--
     预览窗专用工具条（只有 ?preview=1 时才显示）。
@@ -55,11 +64,45 @@
     不给入口的话用户根本关不掉它。
     直播姬的浏览器源不会带 preview 参数，所以这条工具条
     永远不会出现在正式画面里。
+
+    三个开关（都是「预览窗当桌面挂件用」的需要，点一下切换）：
+      pbTop   置顶：激活后固定压在最上层；关掉就是普通窗口，会被别的窗口盖住
+      pbAuto  自动隐藏标题栏：激活后窗口一失去焦点，这条和所有按钮全藏起来
+      pbCt    点击穿越：激活后整块窗口不吃鼠标（点击落到下面的程序上），
+              只留顶边一条窄带可点 —— 点它窗口拿到焦点，工具条就回来了
   -->
   <div id="previewBar" class="preview-bar" hidden>
     <span class="pb-drag" id="pbDrag">叠加层预览 · 拖动此条可移动窗口</span>
+    <button id="pbTop" type="button" class="pb-toggle" aria-pressed="true">置顶</button>
+    <button id="pbAuto" type="button" class="pb-toggle" aria-pressed="false">自动隐藏标题栏</button>
+    <button id="pbCt" type="button" class="pb-toggle" aria-pressed="false">点击穿越</button>
     <button id="pbReload" type="button">重新加载</button>
     <button id="pbClose" type="button" class="pb-close">关闭预览</button>
+  </div>
+
+  <!--
+    唤出感应带：只有「自动隐藏标题栏」生效且工具条已经藏起来时才有鼠标事件。
+    鼠标碰到窗口顶边这 14px 就把工具条临时唤回来（不然藏起来之后
+    连「关闭预览」都没法点）。
+    **开了「点击穿越」之后它更关键**：那时整块窗口都不吃鼠标，只有它顶着可点，
+    点一下窗口才能拿到焦点、把工具条叫回来（否则只能去控制台把穿越关掉）。
+  -->
+  <div id="pbHot" class="pb-hot"></div>
+
+  <!--
+    拉边缘改大小的把手：四边（8px）+ 四角（14px），鼠标移上去亮一条。
+    无边框窗口的系统缩放热区只有 4px 宽，叠加层还全透明 —— 用户根本
+    不知道往哪儿按（反馈"拉不动"就是它）。只在预览窗里生效。
+  -->
+  <div id="pbGrips" class="pb-grips" aria-hidden="true">
+    <i class="pb-edge pb-e-n" data-edge="n"></i>
+    <i class="pb-edge pb-e-s" data-edge="s"></i>
+    <i class="pb-edge pb-e-w" data-edge="w"></i>
+    <i class="pb-edge pb-e-e" data-edge="e"></i>
+    <i class="pb-edge pb-e-nw" data-edge="nw"></i>
+    <i class="pb-edge pb-e-ne" data-edge="ne"></i>
+    <i class="pb-edge pb-e-sw" data-edge="sw"></i>
+    <i class="pb-edge pb-e-se" data-edge="se"></i>
   </div>
 
   <script src="/shared/lyric-sync.js"></script>
