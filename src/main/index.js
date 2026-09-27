@@ -23,6 +23,7 @@ const { AppServer } = require('./server');
 const { createCommandHandler } = require('./commands');
 const { SelfTest } = require('./selftest');
 const { NeteaseBrowserFallback } = require('./sources/netease-browser');
+const { AUDIO_EXT } = require('./sources/local');   // 打开文件对话框的扩展名与"能播的格式"共用一份
 const { BiliBrowserSession } = require('../core/bilibili/browser');
 const { BrowserDanmakuChannel } = require('../core/bilibili/browser-channel');
 const { DEFAULT_CONFIG, deepMerge, configPath } = require('../core/config');
@@ -934,7 +935,14 @@ app.whenReady().then(async () => {
           title: '打开本地音乐',
           properties: ['openFile', 'multiSelections'],
           filters: [
-            { name: '音频文件', extensions: ['mp3', 'flac', 'm4a', 'aac', 'wav', 'ogg', 'opus', 'wma', 'ape'] },
+            /**
+             * 扩展名**从 `AUDIO_EXT` 推导**，别再手写一份。
+             *
+             * 原来这里是手写的列表，漏了 `.mp4` —— 而 `AUDIO_EXT` 里是有的，
+             * 也就是"能播但选不到"：用户得先在对话框里切到「全部文件」才看得见
+             * 下载下来的 MV/视频（2026-09-27 用户报障）。两处列表各写一份迟早再飘。
+             */
+            { name: '音频文件', extensions: [...AUDIO_EXT].map((e) => e.replace(/^\./, '')) },
             { name: '全部文件', extensions: ['*'] },
           ],
         });

@@ -248,6 +248,15 @@ const DEFAULT_CONFIG = {
       position: 'top-left',   // top-left | top-right | bottom-left | bottom-right | top-center | bottom-center
       theme: 'card',          // card（带底卡） | minimal（无底卡，仅文字）
       scale: 1,
+      /**
+       * 卡片宽度（px，固定值）。**不是最大宽度** —— 这里是"固定尺寸"，不是"跟着内容伸缩"。
+       *
+       * 2026-09-28 用户报障："不同歌播放时信息卡宽度不一样"。原因：`.info-bar` 是绝对定位
+       * 的收缩盒，只有 `max-width`，于是宽度跟着内容（歌名长短、有没有点歌人/B站数据）跳。
+       * 固定住宽度后，长歌名走跑马灯、其余行走省略号（本来就这么写的）。
+       * 高度同理固定（见 overlay.css 里 `--ib-w` 与「下一首」占位那两处）。
+       */
+      width: 360,
       opacity: 1,
       showCover: true,
       showRequester: true,    // 显示"点歌：xxx"

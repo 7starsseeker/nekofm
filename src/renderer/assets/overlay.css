@@ -225,11 +225,18 @@ body.preview-mode .overlay-canvas { top: var(--preview-bar-h, 33px); }
 .info-bar {
   --ib-accent: #7ee7ff;
   --ib-cover: 64px;
+  --ib-w: 360px;
   display: flex;
   align-items: center;
   gap: 12px;
-  /* max-width 从 78% 放宽到 96%（2026-09-26）：78% 时卡片最宽只有源宽的四分之三，
-     长歌名 / "歌手 · 点歌人" 那两行都是 nowrap+ellipsis，于是右侧被截得很明显 */
+  /**
+   * **固定宽度**（2026-09-28 用户报障："不同歌播放时信息卡宽度不一样"）。
+   * 它绝对定位、没有 width 时是"收缩盒"：宽度跟着歌名长短、有没有点歌人/B站数据跳，
+   * 于是卡片会一宽一窄地闪。改成定宽后：长歌名走跑马灯（.mq-*），
+   * 「歌手 · 点歌人」那行走 nowrap + ellipsis —— 都是本来就有、之前用不上的能力。
+   * 值由 config.overlay.infoBar.width 给（控制台「信息卡宽度」滑杆），--ib-w 由 overlay.js 写入。
+   */
+  width: var(--ib-w);
   max-width: 96%;
   padding: 10px 16px 10px 10px;
   border-radius: 14px;
@@ -285,6 +292,11 @@ body.preview-mode .overlay-canvas { top: var(--preview-bar-h, 33px); }
   font-weight: 700;
   font-size: 1.12em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  /* 卡片定宽（--ib-w）之后，歌名必须**允许收缩**才能走省略号/跑马灯：
+     flex 默认 `min-width: auto` 时它不肯缩到内容宽度以下，整行会顶出卡片外。
+     原来卡片是"跟着内容长宽"的收缩盒，所以一直没暴露这个问题。 */
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .ib-badge {
   flex: 0 0 auto;
@@ -300,6 +312,10 @@ body.preview-mode .overlay-canvas { top: var(--preview-bar-h, 33px); }
   display: flex; align-items: center; gap: 6px;
   font-size: .82em; opacity: .88;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  /* 这一行走的是 inline 小项（歌手/点歌人/B站数据），全都没有时它会塌成 0 高
+     —— 卡片高度就跟着变（用户："不显示的信息也要保留它那块位置"）。
+     1.45em 正是本行"有一行字"时的高度（line-height 是 1.45），所以空着时与满着时等高。 */
+  min-height: 1.45em;
 }
 .ib-sep { opacity: .5; }
 .ib-requester { color: var(--ib-accent); }
@@ -329,7 +345,25 @@ body.preview-mode .overlay-canvas { top: var(--preview-bar-h, 33px); }
   opacity: .72;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.ib-upnext[hidden] { display: none; }
+
+/**
+ * **「没内容就藏起来」不能把格子也抽掉**（2026-09-28 用户："有些信息不显示的话
+ * 对应的区域也应当保留出来"）。
+ *
+ * 这两行是卡片里唯一会整行消失的（下一首有没有下一首、进度条可能被设置关掉）。
+ * 用 `display:none` 藏，高度就跟着变，下面的内容还会往上跳。改成"占位但不可见"：
+ * `visibility:hidden` **保留盒子的尺寸**，所以高度与有内容时**完全一致**
+ * （不用写死数值，字号/缩放变了也不会失准）。
+ *
+ * 行内的小项（音源角标、点歌人、B站数据）不这么处理 —— 它们挤在一行里，
+ * 保住格子会在文字中间留出空洞，反而更怪；卡片定宽之后它们左右挪动不影响卡片尺寸。
+ */
+.ib-upnext[hidden],
+.ib-progress[hidden] {
+  display: block;
+  visibility: hidden;
+}
+.ib-progress[hidden] { display: flex; }
 
 
 /* （旧的 .track-card 样式已移除：信息栏统一由上面的 .info-bar 承担） */

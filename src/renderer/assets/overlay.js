@@ -607,6 +607,8 @@
       + ' theme-' + (b.theme || 'card');
     el.style.setProperty('--ib-accent', b.accentColor || '#7ee7ff');
     el.style.setProperty('--ib-cover', (b.coverSize || 64) + 'px');
+    // 固定宽度：不设的话卡片是收缩盒，宽度会跟着歌名/点歌人有无而变（用户报障）
+    el.style.setProperty('--ib-w', (b.width || 360) + 'px');
     el.style.opacity = String(b.opacity == null ? 1 : b.opacity);
     const sc = b.scale || 1;
     // 位置类里可能已经用了 transform（居中类），所以缩放走 zoom 之外的 CSS 变量
@@ -1012,18 +1014,40 @@
     els.infoBar.hidden = false;
     els.infoBar.classList.toggle('has-cover', !!b.showCover);
 
-    // 封面：远端图直接用；本地图走 /stream/cover。取不到就显示音符占位
+    /**
+     * 封面：远端图直接用；本地图走 /stream/cover。取不到就显示音符占位。
+     *
+     * 这里**不能**只看"src 变了没有"来决定显不显示（2026-09-27 用户报障）：
+     * 无封面的曲目（本地视频没有内嵌图/侧车图 → `cover` 为空）会把 `<img>` 藏起来，
+     * 而 `src` 属性**仍留着上一首的地址**；等播回**同一首**时 `src` 与属性相同，
+     * 于是走了"什么都不用做"的分支 —— 图**再也不会被显示出来**。
+     * 实测路径：网易云歌 →（打开本地视频，无封面）→ 播回刚那首网易云歌 → 卡片一直空着；
+     * 点一下「下一首」再「上一首」才恢复（因为中途 src 被别的歌换过）。
+     *
+     * 所以分三种：换图 / 同一张图但曾被藏起来（只改显示状态，不重设 src —— 同值不会重新加载）
+     * / 真没有封面。加载失败用 dataset 记着，失败过的图不硬撑，落回音符占位。
+     */
     if (b.showCover) {
       els.ibCover.parentElement.hidden = false;
       const src = np.cover || '';
-      if (src && els.ibCover.getAttribute('src') !== src) {
-        els.ibCover.hidden = false;
-        els.ibCoverFallback.hidden = true;
-        els.ibCover.onerror = () => { els.ibCover.hidden = true; els.ibCoverFallback.hidden = false; };
-        els.ibCover.src = src;
-      } else if (!src) {
+      if (!src) {
         els.ibCover.hidden = true;
         els.ibCoverFallback.hidden = false;
+      } else if (els.ibCover.getAttribute('src') !== src) {
+        delete els.ibCover.dataset.failed;
+        els.ibCover.onerror = () => {
+          els.ibCover.dataset.failed = src;
+          els.ibCover.hidden = true;
+          els.ibCoverFallback.hidden = false;
+        };
+        els.ibCover.hidden = false;
+        els.ibCoverFallback.hidden = true;
+        // **`src` 放最后赋**：赋值的瞬间就可能触发 error（同步派发的实现/缓存里记着的失败），
+        // 放前面的话紧接着的"显示"会把 onerror 刚设好的隐藏状态盖掉。
+        els.ibCover.src = src;
+      } else if (els.ibCover.hidden && els.ibCover.dataset.failed !== src) {
+        els.ibCover.hidden = false;
+        els.ibCoverFallback.hidden = true;
       }
     } else {
       els.ibCover.parentElement.hidden = true;

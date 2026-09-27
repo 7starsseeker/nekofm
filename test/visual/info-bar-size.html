@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>信息卡：固定尺寸自检（宽/高不随内容变）</title>
+<!--
+  手动自检页（不在 npm test 里 —— 它需要浏览器做真实布局）。
+  打开方式：直接双击本文件即可（file:// 下同目录树的 CSS 能正常加载）。
+
+  验的是什么（2026-09-28 用户报障："不同歌播放时信息卡宽度不一样 / 有些信息不显示时
+  对应区域应当保留"）：
+    · 新版卡片：三种内容组合下宽度与高度必须**完全一致**；
+    · 对照组（页面里 .legacy 那套"修复前写法"）：同一批组合应当**宽高都变** ——
+      这就是"断言能红"的证明，别再把它当成噪声删掉。
+  实测：新版 360/360/360、110/110/110；对照组 297/1104/297、110/88/87
+  （长歌名那张旧卡片能涨到 1104px，所以卡片会一宽一窄地跳）。
+-->
+<link rel="stylesheet" href="../../src/renderer/assets/overlay.css">
+<style>
+  body { margin: 0; background: #101820; font-family: sans-serif; color: #cde; }
+  .stage { position: relative; width: 1280px; height: 220px; border-bottom: 1px dashed #345; }
+  h4 { margin: 8px; font: 12px/1.4 monospace; color: #7ee7ff; }
+
+  /* —— 只用于对照的"修复前"写法：不给 width（按内容收缩）；隐藏的行不占位 —— */
+  .legacy .info-bar { width: auto; max-width: 96%; }
+  .legacy .ib-name { flex: 0 1 auto; min-width: auto; }
+  .legacy .ib-line2 { min-height: 0; }
+  .legacy .ib-upnext[hidden], .legacy .ib-progress[hidden] { display: none; }
+</style>
+</head>
+<body>
+<h4>新版（当前 overlay.css）：宽度/高度应当恒定 360 / 110</h4>
+<div class="stage" id="newStage">
+  <div id="newCard" class="info-bar pos-top-left theme-card">
+    <div class="ib-cover">
+      <img id="newCover" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="">
+    </div>
+    <div class="ib-meta">
+      <div class="ib-line1">
+        <span class="ib-name" id="newName">—</span>
+        <span class="ib-badge" id="newSource">网易云</span>
+      </div>
+      <div class="ib-line2" id="newLine2">
+        <span id="newArtist">歌手</span>
+        <span class="ib-sep" id="newSep1">·</span>
+        <span class="ib-requester" id="newRequester">点歌：某人</span>
+        <span class="ib-sep" id="newSep2">·</span>
+        <span class="ib-bili" id="newBili">播放 1.2 万 · 弹幕 33</span>
+      </div>
+      <div class="ib-progress" id="newProgress">
+        <div class="ib-bar"><i></i></div>
+        <div class="ib-time"><span>1:23</span><span>4:05</span></div>
+      </div>
+      <div class="ib-upnext" id="newUpNext">下一首：某首歌 - 某歌手（某人 点）</div>
+    </div>
+  </div>
+</div>
+
+<h4>对照组（修复前写法）：应当宽高都在变（旧 297/1104/297、110/88/87）</h4>
+<div class="stage legacy" id="oldStage">
+  <div id="oldCard" class="info-bar pos-top-left theme-card">
+    <div class="ib-cover">
+      <img id="oldCover" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="">
+    </div>
+    <div class="ib-meta">
+      <div class="ib-line1">
+        <span class="ib-name" id="oldName">—</span>
+        <span class="ib-badge" id="oldSource">网易云</span>
+      </div>
+      <div class="ib-line2" id="oldLine2">
+        <span id="oldArtist">歌手</span>
+        <span class="ib-sep" id="oldSep1">·</span>
+        <span class="ib-requester" id="oldRequester">点歌：某人</span>
+      </div>
+      <div class="ib-progress" id="oldProgress">
+        <div class="ib-bar"><i></i></div>
+        <div class="ib-time"><span>1:23</span><span>4:05</span></div>
+      </div>
+      <div class="ib-upnext" id="oldUpNext">下一首：某首歌 - 某歌手（某人 点）</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const LONG = '你便是完美且究极的盖塔！ 偶像 × STORM《我推的孩子vs真盖塔对决新盖塔》【hiromi】 - 1.你便是完美且究极的盖塔';
+const SHORT = 'アイドル';
+
+function measure(variant) {
+  const el = (id) => document.getElementById(id);
+  const hide = (id, h) => { const e = el(id); if (e) e.hidden = h; };
+  const set = (p, name, hasRequester, hasUpNext, hasProgress) => {
+    const n = el(p + 'Name'); if (n) n.textContent = name;
+    hide(p + 'Artist', !hasRequester);
+    hide(p + 'Requester', !hasRequester);
+    hide(p + 'Sep1', !hasRequester);
+    hide(p + 'Sep2', !hasRequester);
+    hide(p + 'Bili', !hasRequester);
+    hide(p + 'UpNext', !hasUpNext);
+    hide(p + 'Progress', !hasProgress);
+  };
+  const spec = {
+    A: [SHORT, true, true, true],             // 短名 + 点歌人 + 下一首 + 进度
+    B: [LONG, false, false, true],            // 超长名 + 无第二行内容 + 无下一首
+    C: ['普通长度的歌名', true, true, false],  // 进度条被设置关掉
+  }[variant];
+  set('new', ...spec); set('old', ...spec);
+  const n = el('newCard'), o = el('oldCard');
+  void n.offsetWidth; void o.offsetWidth;
+  return { newW: n.offsetWidth, newH: n.offsetHeight, oldW: o.offsetWidth, oldH: o.offsetHeight };
+}
+
+function runAll() {
+  const out = {};
+  for (const v of ['A', 'B', 'C']) out[v] = measure(v);
+  const nw = ['A', 'B', 'C'].map((v) => out[v].newW);
+  const nh = ['A', 'B', 'C'].map((v) => out[v].newH);
+  out.summary = {
+    新版宽度: nw, 新版高度: nh,
+    新版是否恒定: new Set(nw).size === 1 && new Set(nh).size === 1,
+    对照宽度: ['A', 'B', 'C'].map((v) => out[v].oldW),
+    对照高度: ['A', 'B', 'C'].map((v) => out[v].oldH),
+  };
+  return out;
+}
+// 打开页面后自动跑一遍并把结果打到控制台
+console.log(JSON.stringify(runAll().summary, null, 1));
+</script>
+</body>
+</html>

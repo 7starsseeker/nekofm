@@ -1346,6 +1346,8 @@
     $('ibOpTxt').textContent = $('ibOpacity').value + '%';
     $('ibCoverSize').value = b.coverSize || 64;
     $('ibCoverTxt').textContent = $('ibCoverSize').value + 'px';
+    $('ibWidth').value = b.width || 360;
+    $('ibWidthTxt').textContent = $('ibWidth').value + 'px';
     if (/^#[0-9a-f]{6}$/i.test(b.accentColor || '')) $('ibAccent').value = b.accentColor;
     $('ibCover').checked = !!b.showCover;
     $('ibRequester').checked = !!b.showRequester;
@@ -1365,6 +1367,7 @@
       scale: Number($('ibScale').value) / 100,
       opacity: Number($('ibOpacity').value) / 100,
       coverSize: Number($('ibCoverSize').value),
+      width: Number($('ibWidth').value),
       accentColor: $('ibAccent').value,
       showCover: $('ibCover').checked,
       showRequester: $('ibRequester').checked,
@@ -1395,7 +1398,7 @@
    * `change` 只在松手（或勾选框/下拉变化）时发一次，正好一次拖拽一次落盘。
    */
   const INFO_BAR_IDS = [
-    'ibEnabled', 'ibPos', 'ibTheme', 'ibScale', 'ibOpacity', 'ibCoverSize', 'ibAccent',
+    'ibEnabled', 'ibPos', 'ibTheme', 'ibScale', 'ibOpacity', 'ibCoverSize', 'ibWidth', 'ibAccent',
     'ibCover', 'ibRequester', 'ibSource', 'ibProgress', 'ibTime', 'ibUpNext', 'ibBiliStats', 'ibHideIdle',
   ];
   INFO_BAR_IDS.forEach((id) => {
@@ -1406,12 +1409,13 @@
       if (!r.ok) log('error', '信息栏设置应用失败：' + ((r.result && r.result.msg) || r.error || '未知'));
     });
   });
-  ['ibScale', 'ibOpacity', 'ibCoverSize'].forEach((id) => {
+  ['ibScale', 'ibOpacity', 'ibCoverSize', 'ibWidth'].forEach((id) => {
     const e = $(id);
     if (e) e.addEventListener('input', () => {
       $('ibScaleTxt').textContent = $('ibScale').value + '%';
       $('ibOpTxt').textContent = $('ibOpacity').value + '%';
       $('ibCoverTxt').textContent = $('ibCoverSize').value + 'px';
+      $('ibWidthTxt').textContent = $('ibWidth').value + 'px';
     });
   });
 
