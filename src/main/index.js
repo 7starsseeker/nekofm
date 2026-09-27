@@ -1324,13 +1324,33 @@ app.whenReady().then(async () => {
         await clickBtn('pbCt');     // 再点一下关掉，别把窗口留在透传状态
         await settle();
         const ctOffOk = (await diag()).overlayClickThrough.both === false;
+        /**
+         * 长歌词自动缩字号（用户要求）：真窗口里塞一句超长歌词，看它会不会把字号缩到装得下。
+         * 这条只能这么验 —— 它是**布局行为**，Node 单测够不到，只有真布局量得出来。
+         * 塞完调一次 fitLyrics()（页面自己也暴露了入口给调试用），再读回字号与是否溢出。
+         */
+        const fit = await wBoth.webContents.executeJavaScript(`(() => {
+          const stage = document.getElementById('stage');
+          const lines = document.getElementById('lines');
+          const size = () => parseFloat(getComputedStyle(document.body).getPropertyValue('--font-size')) || 0;
+          const before = size();
+          lines.innerHTML = '<div class="line active">' + '长'.repeat(400) + '</div>';
+          window.__nekofm.fitLyrics();
+          return {
+            before, after: size(), fits: lines.scrollHeight <= stage.clientHeight + 1,
+            fit: window.__nekofm.S.fontFit,
+          };
+        })()`);
+        // 字号必须真的变小了，而且缩完真的装得下（留 1px 误差）
+        const fitOk = fit.fits && fit.after < fit.before;
         const ctOk = ctOnOk && inState === true && outState === false && ctOffOk;
-        overlayCtlOk = !!off.ok && topOff && !!on.ok && topOn && !!r1.ok && !!r2.ok && same && ctOk;
+        overlayCtlOk = !!off.ok && topOff && !!on.ok && topOn && !!r1.ok && !!r2.ok && same && ctOk && fitOk;
         overlayCtlDetail = `置顶可关=${topOff} / 可开=${topOn}；拉边命令=${!!r1.ok && !!r2.ok}；`
           + `没拖动时尺寸不变=${same}；穿越按钮开关=${ctOnOk}/${ctOffOk}；`
           // 打的是**状态值**（不是断言真假）：进入顶部那条应为 true、挪到内容区应为 false，
           // 括号里是页面自己记的那一份，两边一致才算这条链真的通
-          + `顶部可点带：进顶部=${inState} / 挪到内容区=${outState}（页面侧=${pageSees}）`;
+          + `顶部可点带：进顶部=${inState} / 挪到内容区=${outState}（页面侧=${pageSees}）；`
+          + `长歌词自动缩字号=${fitOk}（${fit.before}→${fit.after}px，装得下=${fit.fits}）`;
       } catch (e) { overlayCtlDetail = '执行失败：' + e.message; }
 
       const checks = [

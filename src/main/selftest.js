@@ -730,6 +730,34 @@ class SelfTest {
                 + `顶部可点带=${band}；穿越时把手让开=${gripsOff}`,
             };
           } },
+          { id: 'lyricDisplay', name: '歌词显示：透明度只管歌词 + 太长的句子自动缩字号', run: async () => {
+            /**
+             * 两条都容易在使用中被"顺手改回去"，所以钉住：
+             *  1) 「歌词透明度」挂在 `.stage` 上，**不能挂回画布** ——
+             *     挂画布会把信息卡片一起压暗，而卡片有自己的透明度滑块（用户明确要求分开）。
+             *     预览工具条也不该变淡（它是操作界面）。
+             *  2) 长歌词自适应：`fitLyrics()` 必须在 `autoFit()` 之后跑
+             *     （删行 → 缩字号 → 最后对齐中心，顺序反了布局就是错的），
+             *     而且字号计算要把 `S.fontFit` 乘进去（漏了就白算），
+             *     还得有下限（缩无可缩时宁可裁，不能缩成没人看得见的小字）。
+             */
+            const css = await (await fetch(base + '/assets/overlay.css')).text();
+            const js = await (await fetch(base + '/assets/overlay.js')).text();
+            const ctl = await (await fetch(base + '/')).text();
+            const stageOpacity = /\.stage\s*\{[^}]*opacity:\s*var\(--opacity\)/.test(css);
+            const canvasClean = !/\.overlay-canvas\s*\{[^}]*opacity:/.test(css);
+            const label = ctl.includes('歌词透明度');
+            const fitFn = /function fitLyrics\s*\(/.test(js) && /const MIN_FIT = 0\.\d+/.test(js);
+            const order = /autoFit\(\);\s*\n\s*fitLyrics\(\);/.test(js);
+            const inFontSize = /--font-size',\s*\n?\s*Math\.max\(8, base \* scale \* S\.fontFit\)/.test(js)
+              || /base \* scale \* S\.fontFit/.test(js);
+            return {
+              ok: stageOpacity && canvasClean && label && fitFn && order && inFontSize,
+              detail: `透明度挂在歌词层=${stageOpacity}；画布不再挂透明度=${canvasClean}；`
+                + `控制台文案=${label}；有 fitLyrics 与下限=${fitFn}；`
+                + `顺序（删行→缩字号）=${order}；字号乘了自适应系数=${inFontSize}`,
+            };
+          } },
           { id: 'controlDom', name: '控制台含本地音乐入口与各功能面板', run: async () => {
             const html = await (await fetch(base + '/')).text();
             const need = [

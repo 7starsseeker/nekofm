@@ -2071,12 +2071,16 @@
     st.setProperty('--ls-fs', fs + 'px');
     if (/^#[0-9a-f]{3,8}$/i.test(ov.color || '')) st.setProperty('--ls-color', ov.color);
     if (/^#[0-9a-f]{3,8}$/i.test(ov.activeColor || '')) st.setProperty('--ls-active', ov.activeColor);
-    st.setProperty('--ls-opacity', String(ov.opacity == null ? 1 : ov.opacity));
     const sw = Number(ov.strokeWidth) || 0;
     st.setProperty('--ls-stroke', sw > 0
       ? `0 1px ${Math.max(1, Math.round(sw / 2))}px ${ov.strokeColor || '#000'}`
       : 'none');
     st.textAlign = ov.align || 'center';
+    /**
+     * 歌词条也吃「歌词透明度」（它就是歌词的另一个显示位置，跟自己窗里的那套口径一致）。
+     * 直接设元素 opacity —— 曾经还多设过一个 `--ls-opacity` 变量，但全工程没人用过它
+     * （真正的变淡只有这一行），2026-09-27 顺手删掉，免得让人以为设了两处。
+     */
     strip.el.style.opacity = String(ov.opacity == null ? 1 : ov.opacity);
   }
 

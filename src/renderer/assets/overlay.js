@@ -411,6 +411,8 @@
       },
     },
     timeline: { meta: {}, lines: [] },
+    /** 长歌词自适应算出来的字号系数（1 = 不缩；见 fitLyrics） */
+    fontFit: 1,
     track: null,
     nowPlaying: null,
     upNext: null,
@@ -466,7 +468,43 @@
      * 那是给"源铺满整个画面"的用法准备的。
      */
     const scale = c.scaleFont ? (vh >= 400 ? (vh / 1080) : 1) : 1;
-    els.root.style.setProperty('--font-size', Math.max(8, base * scale).toFixed(2) + 'px');
+    /**
+     * 再乘一个"长歌词自适应"系数（`S.fontFit`，由 fitLyrics() 算，默认 1）。
+     * 三个系数分头管三件事、互不干扰：配置字号 × 源尺寸缩放 × 这一句装不装得下。
+     * 折进 --font-size 一个变量里，正文/译文/描边（em）/底板全都跟着一起缩。
+     */
+    els.root.style.setProperty('--font-size',
+      Math.max(8, base * scale * S.fontFit).toFixed(2) + 'px');
+  }
+
+  /** 长歌词自适应：字号最多缩到配置值的这个比例，再小就没法看了（宁可裁） */
+  const MIN_FIT = 0.45;
+
+  /**
+   * 一句话太长（换行后整块比歌词区还高）时**自动缩小字号**，而不是被裁掉。
+   *
+   * 用户要求（2026-09-27）："歌词太长的时候，自动缩小字体而不是截断导致显示不全"。
+   * 原来只有 autoFit()（装不下就删非当前行）—— 但**当前这一行自己就比舞台高**时它没辙
+   * （最后一行不能删），于是上下被 `overflow: hidden` 裁掉，看起来就是"显示不全"。
+   *
+   * 做法：从 1 倍开始量，装不下就按高度比缩一档，最多几轮收敛（有 MIN_FIT 下限）。
+   * **每次都从 1 倍量起** —— 否则上一句缩过的比例会粘到下一句短句上。
+   * 调用点：重建歌词行之后（buildWindow）、窗口尺寸变化、配置变化（都走这三个入口）。
+   */
+  function fitLyrics() {
+    const stageH = els.stage ? els.stage.clientHeight : 0;
+    if (!stageH || !els.lines) return;
+    let fit = 1;
+    for (let i = 0; i < 6; i++) {
+      S.fontFit = fit;
+      applyFontScale();
+      if (els.lines.scrollHeight <= stageH) return;   // 装得下，收工
+      if (fit <= MIN_FIT) return;                     // 已经到下限，认命（宁可裁）
+      // 按"还差多少"估下一档，留 2% 余量，免得在临界值上来回抖
+      const next = Math.max(MIN_FIT, fit * (stageH / els.lines.scrollHeight) * 0.98);
+      if (next >= fit - 0.005) return;
+      fit = next;
+    }
   }
 
   function applyConfig(cfg) {
@@ -689,8 +727,11 @@
     /**
      * 先收缩到"装得下"，**布局定下来之后**再对齐中心 —— 顺序不能反：
      * `autoFit()` 会删行、改变整体高度，先对齐再删等于白算。
+     * `fitLyrics()` 同理要夹在中间：它会改字号、整体高度又变一次（长歌词自动缩字号），
+     * 所以"删行 → 缩字号 → 再对齐"才是最终布局。
      */
     autoFit();
+    fitLyrics();
     applyLinesTransform(slideY);
   }
 
@@ -777,6 +818,12 @@
     }
     document.documentElement.style.setProperty('--lyric-reserve', h + 'px');
     S._lyricReserve = h;
+    /**
+     * 信息卡出现/消失会改歌词区的高度，而这件事**不一定伴随歌词换行**
+     * （同一句里卡片被唤醒时，重建条件根本不触发）—— 所以在这里补一次自适应，
+     * 否则"上一句太长的字号系数"会留着，或者缩过的字在卡片让位后又没必要地小。
+     */
+    if (S._r) fitLyrics();
   }
 
   /**
@@ -1158,5 +1205,5 @@
     if (S._r) buildWindow(S._r);
   });
   // 暴露给调试：可在控制台手工调自动收缩/让位
-  window.__nekofm = { S, applyConfig, locate: LyricSync.locate, autoFit, reserveForInfoBar, applyRolling };
+  window.__nekofm = { S, applyConfig, locate: LyricSync.locate, autoFit, fitLyrics, reserveForInfoBar, applyRolling };
 })();

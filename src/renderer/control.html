@@ -186,7 +186,6 @@
     --ls-fs: 18px;                 /* 当前行字号（由叠加层 fontSize 按比例缩下来） */
     --ls-color: #5b6878;           /* 非当前行 */
     --ls-active: var(--accent);    /* 当前行 */
-    --ls-opacity: 1;
     --ls-stroke: none;
   }
   /* 控制台歌词条原来**没有字体声明**，继承的是浏览器默认（中文下是宋体）——
@@ -636,9 +635,13 @@
     </div>
     <div class="tip">默认<b>不勾</b>：字号就是上面滑块的值 —— 配合「把浏览器源的框设成组件尺寸」用，
       框设多大、字幕就正好占多大，所见即所得。<br />
-      勾上则按源高等比缩放（1080p 基准），适合把源铺满整个画面的用法。</div>
+      勾上则按源高等比缩放（1080p 基准），适合把源铺满整个画面的用法。<br />
+      <b>太长的一句会自动缩小字号</b>（不缩就会被裁掉、显示不全）：从上面那个字号往下缩，
+      最多缩到 45%，装得下就停。</div>
     <div class="tip" id="oBoxHint">—</div>
-    <div class="row"><label class="lbl">透明度</label><input id="oOpacity" type="range" min="10" max="100" /><span id="oOpTxt" class="tip"></span></div>
+    <div class="row"><label class="lbl">歌词透明度</label><input id="oOpacity" type="range" min="10" max="100" /><span id="oOpTxt" class="tip"></span></div>
+    <div class="tip">只管<b>歌词</b>（正文 / 译文 / 底板一起变淡）。信息卡片有它自己那组的
+      「透明度」，两个互不影响 —— 想让卡片常亮、只把歌词压暗，就调这一个。</div>
     <div class="row"><label class="lbl">歌词底板</label><input id="oBackdrop" type="range" min="0" max="95" /><span id="oBdTxt" class="tip"></span></div>
     <div class="tip">「歌词底板」给字幕垫一条半透明色带 —— 文字融进画面时（比如浅青高亮落在青蓝色游戏画面上）
       这是<b>最稳</b>的一招，任意背景都看得清。0 = 关；<b>35~55</b> 最常用。</div>
