@@ -49,8 +49,8 @@
 
     <div class="row">
       <label>音量</label>
-      <input id="volume" type="range" min="0" max="100" value="100" style="flex:1;min-width:160px" />
-      <span id="volText">100%</span>
+      <!-- 竖刻度音量控件（与控制台底部播放器栏共用 /shared/volume-dial.js，见该文件头注释） -->
+      <span id="volSlot"></span>
     </div>
 
     <div class="meter"><i id="bar"></i></div>
@@ -66,11 +66,17 @@
       直接选一块<b>虚拟声卡</b>的输入口（如 <code>Voicemeeter Aux Input</code> 或 <code>CABLE Input</code>），
       再去直播软件里采它的输出口 —— 这样音乐单独一路，不和麦克风、游戏声混在一起。<br />
       这里只负责"选输出设备"，<b>不改系统音频路由</b>（各人接法不同）。
-      为什么需要虚拟声卡、两种常见接法见 README 第 3 节「音频：为什么这里要用 VoiceMeeter」。
+      为什么需要虚拟声卡、两种常见接法见 README 第 3 节「音频：为什么这里要用 VoiceMeeter」。<br />
+      音量控件：鼠标移到按钮上展开<b>竖条</b>，每格 2%；<b>点击按钮</b>直接静音/取消静音。
+      <b>动态音量</b>（面板里的开关）会实时测当前电平，离目标 dBFS 太远才自动调整（目标可改）——
+      它只负责把<b>音源</b>拉到目标，音量条之后再作用，所以两者互不打架：
+      音量条拉低就是整体更安静，动态音量不会把它补回来。
     </div>
   </main>
 
   <audio id="audio" preload="auto"></audio>
+  <script src="/shared/volume-dial.js"></script>
+  <script src="/shared/auto-gain.js"></script>
   <script src="/assets/player.js"></script>
 </body>
 </html>

@@ -146,6 +146,10 @@
     "muted": false,
     "deviceId": "",
     "deviceLabel": "",
-    "prerollMs": 350
+    "prerollMs": 350,
+    "autoGain": {
+      "enabled": false,
+      "targetDb": -16
+    }
   }
 }

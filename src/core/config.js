@@ -282,6 +282,19 @@ const DEFAULT_CONFIG = {
     deviceId: '',          // setSinkId 的输出设备（VoiceMeeter 里选）
     deviceLabel: '',       // 设备名；deviceId 失效时按名字找回（见 engine.setDevice）
     prerollMs: 350,        // 歌词提前量，配合人耳延迟
+    /**
+     * 动态音量（2026-10-13）。
+     *
+     * 打开后由**播放核心窗**实时测输出电平（dBFS RMS），离 `targetDb` 超过死区
+     * 才自动调增益 —— 死区/增益上限/快攻慢放的时间常数在 `src/shared/auto-gain.js`，
+     * 那是唯一一份实现（控制台与播放核心窗用同一个文件）。
+     *
+     * 目标值的选取：流媒体平台普遍把节目归一化到 **-14 LUFS**（YouTube/Spotify），
+     * 播客 -16 ~ -19，广播 -23。这里测的是 **RMS 而非 LUFS**（不做 K 加权/门限），
+     * 对流行乐 RMS 通常比 LUFS 低 3~6 dB，所以 -16 dBFS 大致对应 -14 LUFS 的
+     * 听感档位。要更响/更轻就改它（界面上的输入框，范围 -40 ~ 0）。
+     */
+    autoGain: { enabled: false, targetDb: -16 },
   },
 };
 

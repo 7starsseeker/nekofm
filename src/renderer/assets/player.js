@@ -6,6 +6,10 @@
        这是把「音乐」单独送到 VoiceMeeter AUX/CABLE 通道的唯一正规途径
      · currentTime 就是歌词同步的权威时基（比 SMTC 精确，SMTC 会漂移）
    进度上报：10Hz POST 回 /api/command，服务端再 SSE 广播给叠加层
+
+   2026-10-13 起这里还负责**动态音量**（自动增益）：
+   为了拿电平，必须给 <audio> 建 Web Audio 图，于是"声音的去处"从 element
+   的 setSinkId 变成 AudioContext.setSinkId —— 见下面「音频图与动态音量」一节。
    ========================================================================== */
 'use strict';
 
@@ -17,8 +21,7 @@
     devLabel: document.getElementById('devLabel'),
     refreshDev: document.getElementById('refreshDev'),
     testTone: document.getElementById('testTone'),
-    volume: document.getElementById('volume'),
-    volText: document.getElementById('volText'),
+    volSlot: document.getElementById('volSlot'),
     bar: document.getElementById('bar'),
     kName: document.getElementById('kName'),
     kTime: document.getElementById('kTime'),
@@ -35,6 +38,10 @@
      * （表现："显示正在播放，其实是上一首在响"）。
      */
     loadSeq: null,
+    volume: 1,
+    muted: false,
+    /** 动态音量：{enabled, targetDb}。由 engine 的 state/player 事件下发 */
+    autoGain: { enabled: false, targetDb: -16 },
   };
 
   const post = (body) => fetch('/api/command', {
@@ -80,6 +87,143 @@
     post({ action: 'playerStatus', status: st, duration: audio.duration || 0, error: err || '', seq: S.loadSeq });
   }
 
+  // ============================================================ 音频图与动态音量
+  /**
+   * 为什么要给 <audio> 建 Web Audio 图（2026-10-13 实测，证据见
+   * 2026-10-13-agc-gates.md）：
+   *   · 只有 `createMediaElementSource` 之后才有 AnalyserNode 能测的电平；
+   *   · 一旦建图，**声音的去处就由 `AudioContext.destination` 决定** ——
+   *     element 的 `setSinkId()` 不再影响输出，设备选择必须改走
+   *     `AudioContext.setSinkId()`。实测：`''`（系统默认）与真实 deviceId 都可用，
+   *     但字面量 `'default'` 会抛 NotFoundError（而枚举结果里真有 id 叫 default）。
+   *   · 跨源曲目（网易云 CDN 直链）**必须**给 <audio> 加 `crossorigin="anonymous"`：
+   *     不加时 Chromium 报 "MediaElementAudioSource outputs zeroes due to CORS
+   *     access restrictions"，测到的电平恒为 0；加了之后实测读得到（-30.7 dBFS）。
+   *
+   * 增益链路：source ─┬─→ analyser（测**增益前**的节目电平）
+   *                   └─→ agcGain（动态音量写这里）→ volGain（用户音量写这里）
+   *                       → muteGain（静音写这里）→ destination
+   *   · 测增益**前**的电平：否则增益一动电平就跟着动、增益再变 —— 自我循环。
+   *   · 静音用独立的 GainNode 而不是 `audio.muted`：engine 一直在发 mute 事件，
+   *     但播放核心以前**根本没有处理它**（"静音"实际上一直是坏的，只有图标在变）。
+   *     建图之后 element 的 muted 是否真的会把图里的输出静掉属于实现细节，
+   *     用增益节点是确定的。
+   *
+   * 用户音量为什么也要挪进图里（2026-10-13 用户反馈"开了动态音量后增益一直 +12dB"
+   * 之后实测，用一段已知电平的正弦分别把 element.volume 设成 1 / 0.5 / 0.25 / 0.1，读 AnalyserNode 的 RMS）：
+   *   element 的 `volume` 作用在**图的上游** —— 实测 elVol=1 时 tap 读到 -19.99 dBFS
+   *   （与 ffmpeg 实测的 -20.0 dBFS 一致），elVol=0.1 时读到 -40.03 dBFS（差 20.04dB）。
+   *   也就是说，音量条拉低多少，AGC 就以为"源电平低了多少"、原样补回来 ——
+   *   补到 +12dB 上限为止，音量条等于失灵（顺带把用户看到的 +12dB 钉死）。
+   *   所以音量必须施加在**测量点之后**：element.volume 永久钉在 1，音量交给 volGain。
+   *   语义也更顺：AGC 只负责把**源**拉到目标，之后用户想多安静就多安静。
+   */
+  const AGC_TICK_MS = 50;
+  const AGC_REPORT_MS = 500;                  // 电平回传频率（2Hz）
+  const WIN_FRAMES = Math.round(400 / AGC_TICK_MS);   // 400ms 测量窗
+  let ctx = null, srcNode = null, analyser = null, agcGain = null, volGain = null, muteGain = null;
+  let buf = null;
+  let agc = null;
+  let agcOn = false;
+  let meter = { db: null, gainDb: null, live: false, capped: false };
+  let reportTick = 0;
+  const win = [];
+
+  /**
+   * 把用户音量写进图里（没有图时退回 element.volume —— 那时 AGC 也不存在，
+   * 没有"测量被补偿"的问题）。
+   */
+  function applyVolume(v) {
+    S.volume = v;
+    if (volGain) volGain.gain.value = v;
+    else audio.volume = v;
+  }
+
+  function initGraph() {
+    // 建图**之前**设 crossorigin：跨源音频不带它，MediaElementAudioSource 只输出 0
+    audio.crossOrigin = 'anonymous';
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      ctx = new AC();
+      srcNode = ctx.createMediaElementSource(audio);
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;                // 48kHz 下 ≈43ms 一帧
+      agcGain = ctx.createGain();
+      volGain = ctx.createGain();
+      muteGain = ctx.createGain();
+      agcGain.gain.value = 1;
+      volGain.gain.value = S.volume;
+      muteGain.gain.value = S.muted ? 0 : 1;
+      srcNode.connect(analyser);
+      srcNode.connect(agcGain);
+      agcGain.connect(volGain);
+      volGain.connect(muteGain);
+      muteGain.connect(ctx.destination);
+      audio.volume = 1;                       // 音量改由图负责，element 永远满幅
+      buf = new Float32Array(analyser.fftSize);
+      agc = NekoAutoGain.create({ targetDb: S.autoGain.targetDb });
+      return true;
+    } catch (e) {
+      ctx = null; analyser = null; agcGain = null; volGain = null; muteGain = null;
+      el.kErr.textContent = '音频图创建失败（动态音量与静音不可用）：' + e.message;
+      return false;
+    }
+  }
+
+  /** 取一帧时域波形 → 本窗的 RMS 与峰值（线性 0~1） */
+  function measure() {
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0, peak = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const v = buf[i];
+      sum += v * v;
+      const a = v < 0 ? -v : v;
+      if (a > peak) peak = a;
+    }
+    win.push({ ms: sum / buf.length, peak });
+    while (win.length > WIN_FRAMES) win.shift();
+    let s = 0, pk = 0;
+    for (let i = 0; i < win.length; i++) { s += win[i].ms; if (win[i].peak > pk) pk = win[i].peak; }
+    return { rms: Math.sqrt(s / win.length), peak: pk };
+  }
+
+  function reportMeter(force) {
+    if (!agcOn && !force) return;
+    postThrottled({
+      action: 'playerAutoGain',
+      enabled: agcOn,
+      targetDb: S.autoGain.targetDb,
+      db: Number.isFinite(meter.db) ? meter.db : null,
+      gainDb: Number.isFinite(meter.gainDb) ? meter.gainDb : 0,
+      live: !!meter.live,
+      capped: !!meter.capped,
+      seq: S.loadSeq,
+    });
+  }
+
+  /**
+   * 应用动态音量配置（来自 engine 的 state 广播或 player 事件）。
+   * 目标是**幂等**：10Hz 的 state 广播会反复调它，不能每次都把回路推倒重建。
+   */
+  function applyAutoGain(g) {
+    if (!g) return;
+    const on = !!g.enabled;
+    const target = g.targetDb == null ? S.autoGain.targetDb : Number(g.targetDb);
+    const enabledChanged = on !== S.autoGain.enabled;
+    const targetChanged = target !== S.autoGain.targetDb;
+    S.autoGain = { enabled: on, targetDb: target };
+    if (agc && targetChanged) agc.setTarget(target);
+    if (enabledChanged) {
+      agcOn = on;
+      win.length = 0;
+      reportTick = 0;
+      if (agc) agc.reset();
+      if (agcGain && ctx) agcGain.gain.setTargetAtTime(1, ctx.currentTime, 0.05);
+      if (!on) { meter = { db: null, gainDb: null, live: false, capped: false }; reportMeter(true); }
+    }
+    paintVolume();
+  }
+
   // --------------------------------------------------------------- 设备管理
   async function listDevices() {
     try {
@@ -119,10 +263,20 @@
     el.devLabel.textContent = '设备：' + (d ? (d.label || d.deviceId.slice(0, 8)) : '系统默认');
   }
 
+  /** 输出设备：建图后用 AudioContext.setSinkId，没建图时退回 element 的 setSinkId */
+  function sinkTarget() {
+    // 枚举出来的设备里**有一个 id 就叫 'default'**，而 AudioContext.setSinkId('default')
+    // 实测抛 NotFoundError；表示"系统默认"的正确写法是空串。
+    return S.sinkId === 'default' ? '' : S.sinkId;
+  }
+
   async function applySink(id) {
     S.sinkId = id || '';
     try {
-      if (typeof audio.setSinkId === 'function') {
+      if (ctx && typeof ctx.setSinkId === 'function') {
+        await ctx.setSinkId(sinkTarget());
+        el.kErr.textContent = '—';
+      } else if (typeof audio.setSinkId === 'function') {
         await audio.setSinkId(S.sinkId);
         el.kErr.textContent = '—';
       } else {
@@ -179,23 +333,66 @@
   }
   el.refreshDev.addEventListener('click', listDevices);
 
-  // 1kHz 测试音：验证 VoiceMeeter 路由是否接对了
+  /**
+   * 1kHz 测试音：验证 VoiceMeeter 路由是否接对了。
+   * 建图之后必须**走同一个 AudioContext**，否则测试音会去系统默认设备、
+   * 而音乐在选好的虚拟声卡上 —— 那样这个按钮就骗人了。
+   */
   el.testTone.addEventListener('click', async () => {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+    if (ctx) {
+      if (ctx.state === 'suspended') { try { await ctx.resume(); } catch { /* 忽略 */ } }
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = 1000;
+      gain.gain.value = 0.15;
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      setTimeout(() => { try { osc.stop(); } catch { /* 忽略 */ } }, 1200);
+      return;
+    }
+    const tmp = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = tmp.createOscillator();
+    const gain = tmp.createGain();
     osc.frequency.value = 1000;
     gain.gain.value = 0.15;
-    osc.connect(gain).connect(ctx.destination);
+    osc.connect(gain).connect(tmp.destination);
     osc.start();
-    setTimeout(() => { osc.stop(); ctx.close(); }, 1200);
+    setTimeout(() => { osc.stop(); tmp.close(); }, 1200);
   });
 
-  el.volume.addEventListener('input', () => {
-    const v = Number(el.volume.value) / 100;
-    audio.volume = v;
-    el.volText.textContent = el.volume.value + '%';
-    post({ action: 'setVolume', volume: v });
+  // ------------------------------------------------- 音量控件（竖刻度，与控制台同一份实现）
+  let dial = null;
+  function paintVolume() {
+    if (!dial) return;
+    dial.update({
+      volume: S.volume,
+      muted: S.muted,
+      autoGain: S.autoGain,
+      db: meter.db,
+      gainDb: meter.gainDb,
+      live: meter.live,
+      capped: meter.capped,
+    });
+  }
+  dial = window.NekoVolumeDial.mount(el.volSlot, {
+    volume: S.volume,
+    autoGain: S.autoGain,
+    onVolume: (v) => {
+      applyVolume(v);            // 写进图里的 volGain（element.volume 永远 1）
+      post({ action: 'setVolume', volume: v });
+    },
+    onMute: (m) => {
+      S.muted = m;
+      if (muteGain) muteGain.gain.value = m ? 0 : 1;
+      // 走 engine 的 toggleMute 会让状态绕一圈再广播回来；这里直接写死目标值更干脆
+      post({ action: 'setMuted', muted: m, via: 'dial' });
+      paintVolume();
+    },
+    onAutoGain: (g) => {
+      applyAutoGain(g);
+      reportMeter(true);
+      post({ action: 'setAutoGain', enabled: g.enabled, targetDb: g.targetDb });
+    },
   });
 
   // ------------------------------------------------------------------ 播放
@@ -219,7 +416,7 @@
       audio.src = url;
       audio.load();
     }
-    if (volume != null) { audio.volume = volume; el.volume.value = String(Math.round(volume * 100)); el.volText.textContent = el.volume.value + '%'; }
+    if (volume != null) { applyVolume(volume); paintVolume(); }
     el.kUrl.textContent = url.length > 90 ? url.slice(0, 90) + '…' : url;
     setStatus('loading');
     // 补发的指令会带 resumeAt：让"晚连上的播放核心"接着上次进度继续，
@@ -288,6 +485,27 @@
     el.kTime.textContent = fmt(audio.currentTime) + ' / ' + fmt(d);
   }, 100);
 
+  /**
+   * 动态音量的测量回路。
+   * 为什么不用 requestAnimationFrame：播放核心窗**默认是隐藏的**，隐藏窗的 rAF 不跑；
+   * 这里用 setInterval（建窗时开了 backgroundThrottling:false，实测隐藏状态下
+   * 10ms 定时器 2 秒照样触发 200 次，不节流）。
+   */
+  setInterval(() => {
+    if (!analyser || !agc) return;
+    const m = measure();
+    if (agcOn) {
+      const r = agc.decide(m);
+      if (agcGain && ctx) {
+        // setTargetAtTime：按时间常数指数逼近，不会因阶跃跳变出"咔"声
+        agcGain.gain.setTargetAtTime(Math.pow(10, r.gainDb / 20), ctx.currentTime, Math.max(0.01, r.tauMs / 1000));
+      }
+      meter = { db: r.outDb, gainDb: r.gainDb, live: r.live };
+      reportTick += AGC_TICK_MS;
+      if (reportTick >= AGC_REPORT_MS) { reportTick = 0; reportMeter(); paintVolume(); }
+    }
+  }, AGC_TICK_MS);
+
   // ------------------------------------------------------------------ 指令
   /**
    * SSE 连接：**单连接 + 断开后退避重连**（2026-09-26 修）。
@@ -312,11 +530,16 @@
         if (m.player && (m.player.deviceId || m.player.deviceLabel)) {
           requestRestore(m.player.deviceId, m.player.deviceLabel);
         }
+        if (m.player && m.player.autoGain) applyAutoGain(m.player.autoGain);
+        if (m.player && m.player.muted != null && m.player.muted !== S.muted) {
+          S.muted = !!m.player.muted;
+          if (muteGain) muteGain.gain.value = S.muted ? 0 : 1;
+          paintVolume();
+        }
         el.kName.textContent = m.track ? (m.track.name || m.track.title || '—') : '—';
-        if (m.playback && m.playback.volume != null && document.activeElement !== el.volume) {
-          audio.volume = m.playback.volume;
-          el.volume.value = String(Math.round(m.playback.volume * 100));
-          el.volText.textContent = el.volume.value + '%';
+        if (m.playback && m.playback.volume != null && document.activeElement !== (dial && dial.el.range)) {
+          applyVolume(m.playback.volume);
+          paintVolume();
         }
         return;
       }
@@ -334,7 +557,21 @@
         S.lastStatus = 'loading';
       }
         else if (m.action === 'seek') { audio.currentTime = m.position || 0; }
-        else if (m.action === 'volume') { audio.volume = m.volume; el.volume.value = String(Math.round(m.volume * 100)); el.volText.textContent = el.volume.value + '%'; }
+        else if (m.action === 'volume') {
+          applyVolume(m.volume);
+          paintVolume();
+        }
+        /**
+         * 静音：2026-10-13 之前**播放核心完全没处理这个动作**
+         * （engine 一直在发，界面图标也在变，但声音一点没变）——
+         * 现在写进 muteGain。
+         */
+        else if (m.action === 'mute') {
+          S.muted = !!m.muted;
+          if (muteGain) muteGain.gain.value = S.muted ? 0 : 1;
+          paintVolume();
+        }
+        else if (m.action === 'autoGain') applyAutoGain({ enabled: m.enabled, targetDb: m.targetDb });
         else if (m.action === 'device') { S.sinkId = m.deviceId || ''; el.device.value = S.sinkId; applySink(S.sinkId); }
       }
     };
@@ -349,7 +586,9 @@
   }
 
   // ------------------------------------------------------------------ 启动
-  audio.volume = 1;
+  initGraph();              // 必须在首次 play 之前：crossorigin 要赶在载入媒体之前设好
+  audio.volume = 1;         // element 永远满幅 —— 用户音量由图里的 volGain 负责
+  paintVolume();
   listDevices();
   connect();
   // 设备热插拔

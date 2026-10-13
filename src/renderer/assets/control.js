@@ -105,6 +105,17 @@
 
   let config = null;
   let state = null;
+  /**
+   * 竖刻度音量控件（2026-10-13）。
+   *
+   * 为什么音量控件是**共享模块**：控制台底部栏与播放核心窗都要它，而
+   * "每格 2%""面板向上弹出""动态音量开关"这些约束只要两边各写一遍就必然走样。
+   * 挂载在下面的接线区（`dial = window.NekoVolumeDial.mount(...)`），
+   * 这里先声明是因为 10Hz 的 renderState 要回填它。
+   */
+  let dial = null;
+  /** 动态音量的最近读数（由 state.player.autoGain 来；测量在播放核心窗做） */
+  let agcReading = { db: null, gainDb: null, live: false, capped: false };
 
   /**
    * 底部歌词条（2026-09-26 加）。
@@ -477,10 +488,22 @@
     // 播放器：模式 / 静音 / 收藏 / 闲时 / 缓存
     if (s.player) {
       highlightMode(s.player.mode);
-      $('btnMute').textContent = s.player.muted ? '🔇' : '🔊';
+      // 静音不再有独立按钮：喇叭图标与百分比合成在音量控件里（点了直接静音）
       $('btnFavorite').textContent = s.favorited ? '★ 已收藏' : '☆ 收藏';
-      // 音量滑块回填（服务端记着的值）—— 不回填的话每次开机都停在 100%
-      syncVolSlider(s.player.volume);
+      // 音量控件回填（服务端记着的值）—— 不回填的话每次开机都停在 100%
+      // 动态音量：开关/目标/实时读数一起回填（读数只有播放核心窗测得出来，
+      // 控制台显示的是它 2Hz 报上来的值）
+      if (s.player.autoGain) {
+        agcReading = {
+          autoGain: { enabled: !!s.player.autoGain.enabled, targetDb: s.player.autoGain.targetDb },
+          db: s.player.autoGain.db == null ? null : s.player.autoGain.db,
+          gainDb: s.player.autoGain.gainDb == null ? null : s.player.autoGain.gainDb,
+          live: !!s.player.autoGain.live,
+          capped: !!s.player.autoGain.capped,
+        };
+      }
+      syncVolSlider(s.player.volume, s.player.muted);
+      syncAgcBar();
       const badges = [];
       if (s.player.playingIdle) badges.push('闲时歌单');
       if (s.player.cached) badges.push('来自缓存');
@@ -590,32 +613,73 @@
   on('copyAddr', 'click', () => copyText($('addr').textContent, '歌词叠加层地址'));
   on('copyAddrInfo', 'click', () => copyText($('addrInfo').textContent, '信息卡片地址'));
   on('copyAddrBoth', 'click', () => copyText(location.origin + '/overlay', '合并地址'));
-  on('vol', 'input', () => {
-    const v = Number($('vol').value);
-    $('volTxt').textContent = v + '%';
-    api({ action: 'setVolume', volume: v / 100 });
+  /**
+   * 竖刻度音量控件（2026-10-13 换掉原来的 72px 横条）。
+   *
+   * 用户要求：横条 → 按钮，鼠标移上去弹出**竖着的、带刻度的**音量条（更长），
+   * 并且按每格 2% 走。控件本体在 `/shared/volume-dial.js`
+   * （控制台与播放核心窗**共用同一份实现**），这里只接四件事：
+   * 改音量、切静音、切动态音量、把状态回填进去。
+   *
+   * 2026-10-13 第二次调整（用户反馈"喇叭图标、百分比、动态音量状态三个按钮整合一下"）：
+   * 栏里只剩**一个**按钮（🔊 + 百分比），点击＝静音开关、悬停＝展开竖条；
+   * 动态音量的开关与 dB 读数都收进弹出面板。
+   */
+  dial = window.NekoVolumeDial.mount($('volSlot'), {
+    volume: 1,
+    showAgc: true,
+    // 音量是高频拖动 → 服务端那边走防抖落盘（见 main/commands.js 的 setVolume）
+    onVolume: (v) => { api({ action: 'setVolume', volume: v }); },
+    // 用 setMuted 带上明确的目标值（而不是 toggleMute）：控件的本地状态已经翻转了，
+    // 两边各翻一次万一不同步，图标就会和实际值反着显示
+    onMute: (m) => { api({ action: 'setMuted', muted: m }); },
+    onAutoGain: (g) => { api({ action: 'setAutoGain', enabled: g.enabled, targetDb: g.targetDb }); },
   });
 
   /**
-   * 把音量滑块**回填**成服务端记住的值。
+   * 把服务端记着的音量/静音/动态音量**回填**成界面状态。
    *
    * 2026-09-26 用户反馈："每次启动程序进去音量都是 100%"。
-   * 音量本身其实存住了（`config.player.volume`，实测 0.37），问题在于
-   * 这个滑块**只有 input 事件、没有任何回填** —— 于是每次开机都停在 HTML 里的
-   * 默认 `value="100"`。后果不只是"看着不对"：从"100%"往下拖一点，设进去的是
-   * 0.9x，音量会**突然变响**（用户以为是没记住，其实是拖错基准）。
+   * 音量本身其实存住了（`config.player.volume`，实测 0.37），问题在于控件
+   * **只有出没有进** —— 于是每次开机都停在 HTML 里的默认值。后果不只是"看着不对"：
+   * 从 100% 往下拖一点，设进去的是 0.9x，音量会**突然变响**
+   * （看起来像没记住，其实是拖错了基准）。
    *
-   * 拖动过程中不回填（`activeElement` 判据与播放器页一致），否则 10Hz 的状态广播
-   * 会在手指按着的时候把滑块拽回去。
+   * 拖动过程中不回填滑块（`activeElement` 判据在控件内部），否则 10Hz 的
+   * 状态广播会在手指按着的时候把滑块拽回去。动态音量的读数也走这里 ——
+   * 它由播放核心窗测量、经 state 广播回来，控制台只是显示。
    */
-  function syncVolSlider(volume) {
-    if (volume == null) return;
-    const el = $('vol');
-    if (!el || document.activeElement === el) return;
-    const pct = String(Math.round(volume * 100));
-    if (el.value !== pct) el.value = pct;
-    const txt = $('volTxt');
-    if (txt) txt.textContent = pct + '%';
+  function syncVolSlider(volume, muted) {
+    if (!dial) return;
+    dial.update(Object.assign({}, agcReading, {
+      volume: volume == null ? undefined : volume,
+      muted: muted == null ? undefined : muted,
+    }));
+  }
+
+  /**
+   * 底部栏传输控件右边那枚动态音量读数（用户 2026-10-13 指定的位置）。
+   *
+   * 数据只有一个来源：`engine.state().player.autoGain` —— 由播放核心窗 2Hz 上报
+   * （控制台自己没有 `<audio>`，测不出电平）。所以这里**只显示、不计算**。
+   * 开关没开就整块 hidden：不然常温下底部栏白占一块地方。
+   */
+  function syncAgcBar() {
+    const el = $('agcBar');
+    if (!el) return;
+    const on = !!(agcReading.autoGain && agcReading.autoGain.enabled);
+    if (!on) {
+      if (!el.hidden) { el.hidden = true; el.className = 'pill pb-agc'; }
+      return;
+    }
+    const fmt = (v) => (Number.isFinite(v) ? (v >= 0 ? '+' : '') + v.toFixed(1) : '—');
+    let tx;
+    if (agcReading.db == null) tx = '动态音量 测量中…';
+    else if (!agcReading.live) tx = '动态音量 安静段（不追）';
+    else tx = `动态音量 ${fmt(agcReading.db)} dBFS · 增益 ${fmt(agcReading.gainDb)} dB`;
+    el.className = 'pill pb-agc' + (agcReading.capped ? ' capped' : '');
+    el.hidden = false;
+    $('agcBarTx').textContent = tx + (agcReading.capped ? ' · 已达上限' : '');
   }
 
   /** 把服务端返回的失败原因**明确显示出来**（以前失败是完全静默的，用户以为界面坏了） */
@@ -1454,10 +1518,7 @@
     }
   });
   on('btnSkip', 'click', () => api({ action: 'skip', uname: '控制台' }));
-  on('btnMute', 'click', async () => {
-    const r = await api({ action: 'toggleMute' });
-    if (r.ok) { $('btnMute').textContent = r.result.muted ? '🔇' : '🔊'; log('info', r.result.muted ? '已静音' : '已取消静音'); }
-  });
+  // 静音按钮已并入音量控件（点按钮＝静音开关，见上面的 NekoVolumeDial.mount）
   on('btnFavorite', 'click', async () => {
     const r = await api({ action: 'toggleFavorite' });
     if (r.ok) log('info', r.result.favorited ? '已收藏当前曲目' : '已取消收藏');

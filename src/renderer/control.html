@@ -267,13 +267,22 @@
   .pb-prog .bar { flex: 1 1 auto; width: 100%; min-width: 180px; }
   /* 右侧组不被压缩，但要能整体换到下一行（flex-wrap 已开） */
   .pb-right { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; min-width: 0; }
-  .pb-right input[type=range] { width: 72px; flex: 0 1 72px; }
+  /*
+     ⚠️ 这里**曾经**有一条 `.pb-right input[type=range] { width:72px; flex:0 1 72px }`
+    （给那根 72px 的横音量条用）。2026-10-13 换成竖刻度控件后必须删掉：
+    竖排滑块（.nkvd-range，20px 宽）也在这个容器里，而
+    `.pb-right input[type=range]` 的优先级（0,2,1）高于 `.nkvd-range`（0,1,0），
+    留着会把竖直的滑杆压成 72px 宽的横向滑杆 —— 功能直接废掉。
+  */
   .pb-right .pill { padding: 3px 8px; font-size: 12px; white-space: nowrap; }
+  /* 中间列那枚动态音量读数（传输控件右边）。数字用等宽数字，否则 10Hz 刷新时整行会抖。 */
+  .pb-agc { padding: 3px 9px; font-size: 12px; white-space: nowrap; color: #9fe9ff;
+            font-variant-numeric: tabular-nums; }
+  .pb-agc.capped { color: #ffd479; }
   .pb-time { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  /* 音量百分比在窄界面下先让位（滑杆旁边有数值反而挤） */
-  #volTxt { font-size: 12px; }
-  /* 窄一些就把非必需的（音量百分比、歌手行）让位，保证控件单行放得下 */
-  @media (max-width: 1420px) { #volTxt { display: none; } }
+  /* 窄一些就把非必需的（歌手行）让位，保证控件单行放得下。
+     音量百分比原来在这里被整体 display:none 掉，现在是控件按钮自己的文字，
+     由控件按自己的宽度决定（它只有几十像素，不需要让位）。 */
   @media (max-width: 1120px) { .pb-meta { flex: 0 1 96px; } .pb-line2 { display: none; } }
 </style>
 </head>
@@ -820,6 +829,13 @@
         <button class="mode" data-mode="repeat-one" title="单曲循环">单曲</button>
         <button class="mode" data-mode="shuffle" title="随机播放">随机</button>
       </span>
+      <!-- 动态音量的实时读数：数据只有一个来源 —— engine.state().player.autoGain，
+           由播放核心窗 2Hz 报上来（控制台自己没有 <audio>，测不了）。
+           没开动态音量时整块 hidden，不占位、不影响这一行的高度。 -->
+      <span id="agcBar" class="pill pb-agc" hidden
+            title="动态音量：正在播的电平与当前增益（在播放核心窗里实测）">
+        <span id="agcBarTx">—</span>
+      </span>
     </div>
     <div class="pb-prog" id="pbProg">
       <div class="bar" id="seekBar" title="点击/拖动可跳转"><i id="prog"></i></div>
@@ -829,9 +845,14 @@
   <div class="pb-right" id="pbRight">
     <button id="btnFavorite" title="收藏">☆ 收藏</button>
     <button id="btnLyricStrip" title="显示/隐藏底部歌词条（当播放器用时看词）">歌词</button>
-    <button id="btnMute" title="静音">🔊</button>
-    <span id="volTxt" class="tip">100%</span>
-    <input id="vol" type="range" min="0" max="100" value="100" title="音量" />
+    <!-- 音量：竖刻度按钮 + 悬停弹出的竖条（/shared/volume-dial.js）。
+         2026-10-13 用户要求把「喇叭图标 / 百分比 / 动态音量状态」三个按钮并成一个：
+         **点击按钮＝静音开关**，悬停＝展开竖条，动态音量的开关与 dB 读数收进面板。
+         原来这里是 <span id="volTxt"> + <input id="vol" type="range">（72px 横条）+
+         独立的 <button id="btnMute">，横条在这条 100px 高的栏里既占宽又只能粗调。
+         注意：**不要**给 .pb-right 里的 input[type=range] 写尺寸规则，
+         否则会连带压扁控件内部的竖排滑块（见下面那条注释）。 -->
+    <span id="volSlot"></span>
   </div>
 </footer>
 
@@ -865,6 +886,8 @@
 </div>
 
 <script src="/shared/lyric-sync.js"></script>
+<!-- 竖刻度音量控件：控制台与播放核心窗共用同一份实现（每格 2%、面板开合、动态音量开关） -->
+<script src="/shared/volume-dial.js"></script>
 <script src="/assets/control.js"></script>
 </body>
 </html>

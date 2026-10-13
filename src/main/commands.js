@@ -88,6 +88,13 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
       case 'playerDevices':
         engine.playerDevices = cmd.devices || [];
         return { ok: true, count: engine.playerDevices.length };
+      /**
+       * 动态音量的实时电平（2026-10-13）：播放核心每 500ms 报一次。
+       * 只更新内存读数 —— **不落盘、不触发 change**（见 engine.setAutoGainMeter）。
+       */
+      case 'playerAutoGain':
+        engine.setAutoGainMeter(cmd.db, cmd.gainDb, cmd.live, cmd.capped);
+        return { ok: true };
 
       // ------------------------------------------------ 播放控制
       // 从控制台/HTTP 发起的切歌一律视为"工具本地操作"，无条件放行
@@ -146,6 +153,16 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
       case 'toggleMute': {
         const r = engine.setMuted(!engine.muted);
         saveConfig(engine.config);
+        return r;
+      }
+      /**
+       * 动态音量开关/目标（2026-10-13）。
+       * 开关是低频点击、目标是数字输入框 —— 与音量一样走**防抖落盘**，
+       * 免得拖目标值时把磁盘写爆。
+       */
+      case 'setAutoGain': {
+        const r = engine.setAutoGain(cmd.enabled, cmd.targetDb);
+        saveConfigDebounced();
         return r;
       }
       case 'setPlayMode': {

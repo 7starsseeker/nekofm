@@ -130,11 +130,22 @@
 | `playback` | 只有播放模式（`order` / `repeat-all` / `repeat-one` / `shuffle`） |
 | `idle` | 闲时歌单设置 |
 | `overlay` | 叠加层样式：主题、字号、颜色、描边、底板、行数、翻译/罗马音开关、信息栏 |
-| `player` | 输出设备（`deviceId` / `deviceLabel`，供 `setSinkId`）、歌词提前量 `prerollMs` |
+| `player` | 输出设备（`deviceId` / `deviceLabel`，供 `setSinkId`）、音量 `volume` / 静音 `muted`、歌词提前量 `prerollMs`、动态音量 `autoGain`（`enabled` / `targetDb`） |
 | `demo` | 演练模式素材开关 |
 
 > 历史上 `playback` 段放过 `volume` / `muted`，现已统一到 `player` 段；
 > 老配置里残留的这两个字段无人读取，可放心忽略。
+
+**`player.autoGain` 的两个字段**：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | `false` | 动态音量开关（界面上是音量控件悬停面板里的那个开关） |
+| `targetDb` | `-16` | 目标电平，单位 **dBFS**，范围 `-40 ~ 0`。调低 = 整体更安静 |
+
+> 目标值在界面上可改（控制台底部播放器栏与「播放核心」窗口都能改），改完立刻写回这里。
+> 动态音量**只在偏差超过 ±3 dB 时才动**，增益上限 ±12 dB、输出峰值不越过 −1 dBFS；
+> 这些边界是刻意的默认值，暂时不做成配置项（改错了会把音量推到削波边缘）。
 
 ---
 

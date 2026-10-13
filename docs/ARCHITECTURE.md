@@ -89,6 +89,26 @@ src/
 
 推论：**关闭这个窗口不等于停止播放**，关闭 = 隐藏（销毁会导致音频消失）。
 
+**这个 `<audio>` 外面套了一层 Web Audio 图**（2026-10-13 加动态音量时引入）：
+`createMediaElementSource` 之后分成两路 —— 一路接 `AnalyserNode` 量电平（量的是**加增益之前**
+的源电平，否则增益一动、测量跟着动，成自我循环），另一路依次经
+**用户音量增益 → 动态音量增益 → 静音增益** 到输出。三条由此而来的约束：
+
+- **`element.volume` 恒定钉在 1，用户音量由图里的增益节点施加**：`element.volume` 作用在
+  **音频图之前**（实测：`element.volume=0.1` 时分析器量到的电平比 1.0 时低 20 dB），
+  拿它当音量条就等于把"音量拉低"伪装成"音源太轻"，动态音量会一路补到上限。
+  把音量放到分析器**之后**，动态音量就只管把音源拉到目标，二者互不打架。
+- **输出设备改由 `AudioContext.setSinkId()` 决定**：一旦建图，`audio.setSinkId()` 不再生效
+  （`player.js` 里是"有图走 ctx、没图退回 element"的写法）。默认设备要传**空串**，
+  传 `'default'` 会抛 `NotFoundError`。
+- **跨源音频必须带 `crossorigin="anonymous"`**：不加这个属性，Chromium 会让 `MediaElementSource`
+  输出全零（控制台报 `outputs zeroes due to CORS access restrictions`）—— 即"图建起来了、界面一切正常，
+  但没有声音"。网易云 CDN 带 `Access-Control-Allow-Origin: *`，所以这条能成立。
+- **AGC 的决策与 Web Audio 无关**：`src/shared/auto-gain.js` 只算"这次增益定多少"，
+  播放核心负责喂测量值、把结果设给 GainNode。这样数学部分能在 Node 里直接对拍（`tools/agc.check.js`）。
+  界面上那个竖刻度音量控件是另一个共享模块 `src/shared/volume-dial.js`
+  （控制台底部播放器栏与「播放核心」窗口共用同一份实现与同一套行为）。
+
 ### 时基只有一个：`<audio>.currentTime`
 
 歌词同步不依赖 Windows SMTC 之类的系统媒体会话 —— 很多播放器只在播放/暂停时

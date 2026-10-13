@@ -309,6 +309,23 @@ class Engine extends EventEmitter {
     this.track = null;          // 当前曲目（统一结构）
     this.streamUrl = '';        // 给播放器的本地流地址
     this._loadSeq = 0;          // 载入序号：用于丢弃过期（晚到）的载入结果
+    /**
+     * 动态音量（2026-10-13）：开关 + 目标响度 + **最近一次实测读数**。
+     *
+     * 这里的 `db/gainDb` 是**播放核心窗报上来的**，主进程自己不测任何东西
+     * —— `<audio>` 与 Web Audio 图都在渲染进程，只有那儿看得见电平。
+     * 决策（死区/增益上限/时间常数）也只有一份实现：`src/shared/auto-gain.js`，
+     * 两处界面加载的是同一个文件（`/shared/` 路由）。
+     */
+    const agcCfg = (config.player && config.player.autoGain) || {};
+    this.autoGain = {
+      enabled: !!agcCfg.enabled,
+      targetDb: Number.isFinite(agcCfg.targetDb) ? agcCfg.targetDb : -16,
+      db: null,      // 当前电平（dBFS RMS），null = 还没有读数
+      gainDb: null,  // 动态增益（dB），null = 没在动
+      live: false,   // 当前是否有节目信号（静音/无声时 false）
+      capped: false, // 增益是否已顶到 ±12dB / 峰值天花板（够不到目标）
+    };
     this.lyricSource = '';      // netease | sidecar | embedded | subtitle | none
     this.lyricTimeline = { meta: {}, lines: [] };
     this.lyricRev = 0;
@@ -3435,6 +3452,14 @@ class Engine extends EventEmitter {
   onPlayerEvent(ev) {
     if (!ev || !ev.type) return;
     /**
+     * 动态音量读数（2026-10-13）：2Hz、与"哪一首"无关（它说的是**输出电平**），
+     * 所以**不走下面的过期判定**，直接存。
+     */
+    if (ev.type === 'autoGain') {
+      this.setAutoGainMeter(ev.db, ev.gainDb, ev.live, ev.capped);
+      return;
+    }
+    /**
      * **过期判定**（2026-09-26 重做）：播放核心上报时带上它当前那一份载入序号；
      * 序号不等于 `_loadSeq` 就是上一首的残留状态，直接丢弃。
      *
@@ -3489,6 +3514,44 @@ class Engine extends EventEmitter {
     this.config.player.volume = this.playback.volume;
     this.emit('player', { action: 'volume', volume: this.playback.volume });
     this.emit('change');
+  }
+
+  /**
+   * 动态音量的开关与目标响度（2026-10-13）。
+   *
+   * 主进程**不做测量、不做决策**：分贝只有播放核心窗那个渲染进程测得到
+   * （`<audio>` 和 Web Audio 图都在那儿），决策逻辑在 `src/shared/auto-gain.js`。
+   * 这里只把开关与目标存下来、广播下去 —— 与音量一样**写回配置**（否则重启就丢），
+   * 落盘交给命令层防抖（面板里的目标 dB 是数字框，改一次触发一次）。
+   *
+   * 目标范围与 `core/config.js` 的注释、面板输入框的 min/max 一致：-40 ~ 0 dBFS。
+   */
+  setAutoGain(enabled, targetDb) {
+    const t = Number(targetDb);
+    const target = Number.isFinite(t)
+      ? Math.max(-40, Math.min(0, Math.round(t)))
+      : this.autoGain.targetDb;
+    this.autoGain.enabled = !!enabled;
+    this.autoGain.targetDb = target;
+    if (this.config.player) this.config.player.autoGain = { enabled: this.autoGain.enabled, targetDb: target };
+    // 关掉时立刻清读数：那是关着的时候测的，留在界面上会让人以为还在动
+    if (!this.autoGain.enabled) { this.autoGain.db = null; this.autoGain.gainDb = null; this.autoGain.live = false; this.autoGain.capped = false; }
+    this.emit('player', { action: 'autoGain', enabled: this.autoGain.enabled, targetDb: target });
+    this.emit('change');
+    return { ok: true, enabled: this.autoGain.enabled, targetDb: target };
+  }
+
+  /**
+   * 播放核心上报的实时电平（2Hz，见 player.js 的测量回路）。
+   * **刻意不 `emit('change')`**：change 会触发落盘与全量广播，2Hz 写磁盘毫无意义；
+   * 这几个读数只要出现在 10Hz 的 state 广播里就够（index.js 的广播循环会带上）。
+   */
+  setAutoGainMeter(db, gainDb, live, capped) {
+    this.autoGain.db = Number.isFinite(db) ? db : null;
+    this.autoGain.gainDb = Number.isFinite(gainDb) ? gainDb : null;
+    this.autoGain.live = !!live;
+    // 增益顶到 ±12dB 或峰值天花板 —— 界面据此显示"（已达上限）"
+    this.autoGain.capped = !!capped;
   }
 
   /**
@@ -3725,6 +3788,18 @@ class Engine extends EventEmitter {
         favorited: this.track ? this.isFavorited(this.track) : false,
         deviceId: this.playback.deviceId || '',
         deviceLabel: this.playback.deviceLabel || '',
+        /**
+         * 动态音量（2026-10-13）：控制台的"当前 dBFS / 增益"读数就是从这里来的
+         * —— 测量本身在播放核心窗做，控制台只是显示它报上来的数。
+         */
+        autoGain: {
+          enabled: this.autoGain.enabled,
+          targetDb: this.autoGain.targetDb,
+          db: this.autoGain.db,
+          gainDb: this.autoGain.gainDb,
+          live: this.autoGain.live,
+          capped: this.autoGain.capped,
+        },
       },
       idle: this.config.idle || { enabled: false },
       /** 直播状态与列表页计数（界面分页用） */
