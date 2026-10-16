@@ -33,6 +33,47 @@ function hashFiles(names) {
   return crypto.createHash('md5').update([...names].sort().join('\n')).digest('hex');
 }
 
+/**
+ * 看一眼**真实字节**，判断像不像媒体文件。
+ *
+ * 为什么不能只信 content-type（2026-10-16 用户实测的 bug）：
+ * B站的镜像节点会把**完整的 MP4 标成 `application/json`** ——
+ * 同一个视频，`upos-sz-estgoss` 返回 `application/octet-stream`（能缓存），
+ * `upos-sz-mirrorhw` 返回 `application/json`，字节却是标准的 `ftypisom`。
+ * 原来只看声明就把好文件当错误页扔了，用户看到的是"这首怎么也缓存不上"。
+ * 内容比声明可信，所以这里按魔数嗅探；content-type 只当"先放行"的提示。
+ *
+ * @param {Buffer} buf 响应正文开头几个字节即可
+ * @returns {string} 识别出的容器/编码名；认不出返回 ''
+ */
+function sniffMedia(buf) {
+  if (!buf || buf.length < 12) return '';
+  const ascii = (o, s) => buf.toString('latin1', o, o + s.length) === s;
+  // ISO-BMFF / DASH 分片（B站 m4s、以及 fMP4）
+  if (ascii(4, 'ftyp') || ascii(4, 'styp') || ascii(4, 'moov') || ascii(4, 'moof') || ascii(4, 'mdat')) return 'mp4';
+  if (ascii(0, 'ID3')) return 'mp3';
+  if (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) return 'mp3/aac'; // MPEG 帧同步 / ADTS
+  if (ascii(0, 'fLaC')) return 'flac';
+  if (ascii(0, 'OggS')) return 'ogg';
+  if (ascii(0, 'RIFF')) return 'wav'; // RIFF 容器（wav / 少数 avi）
+  if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return 'webm/mkv';
+  return '';
+}
+
+/**
+ * 开头像不像一段文本（JSON / HTML 错误页）。
+ * 只用来**写进报错信息**：出错时把这几个字节带上，诊断才不用猜
+ * （原来只说"非媒体响应：application/json"，看不到 CDN 到底说了什么）。
+ *
+ * @returns {string} 疑似文本的开头 80 字符；不像文本返回 ''
+ */
+function looksLikeText(buf) {
+  if (!buf || !buf.length) return '';
+  // eslint-disable-next-line no-control-regex
+  const head = buf.toString('utf8', 0, Math.min(buf.length, 160)).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '');
+  return /^\s*[{[<]/.test(head) ? head.replace(/\s+/g, ' ').trim().slice(0, 80) : '';
+}
+
 class MediaCache {
   /**
    * @param {{dir:string, maxBytes?:number, maxFileBytes?:number, enabled?:boolean, log?:Function}} opts
@@ -230,20 +271,34 @@ class MediaCache {
       const res = await fetch(url, { headers: meta.headers || {}, redirect: 'follow' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const type = res.headers.get('content-type') || '';
-      if (!/^(audio|video|application\/octet-stream|binary)/.test(type)) {
-        throw new Error('非媒体响应：' + type);
+      const typeOk = /^(audio|video|application\/octet-stream|binary)/.test(type);
+      // 只拿到"部分内容"就别缓存：半截文件会被当成完整缓存，播到一半就断。
+      // 我们自己从不发 Range，所以真出现 206 只能是对方给的（0- 全长那种不算）。
+      const cr = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/.exec(res.headers.get('content-range') || '');
+      if (cr && (Number(cr[1]) > 0 || (cr[3] !== '*' && Number(cr[2]) + 1 < Number(cr[3])))) {
+        throw new Error(`只拿到部分内容（${cr[0]}），不缓存`);
       }
       const declared = Number(res.headers.get('content-length') || 0);
       if (declared && declared > this.maxFileBytes) throw new Error(`文件过大（${(declared / 1048576).toFixed(1)}MB），不缓存`);
 
       const fh = fs.openSync(part, 'w');
       let size = 0;
+      let sniffed = ''; // 开头字节认出的真实格式
       try {
         const reader = res.body.getReader();
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
           const buf = Buffer.from(value);
+          if (size === 0 && buf.length) {
+            // 第一个数据块就定生死：认得出魔数 → 一定是媒体（content-type 撒谎也不管）；
+            // 认不出 → 只有"声明了媒体类型、且正文不像文本"才放行（保持旧行为）
+            sniffed = sniffMedia(buf);
+            const head = looksLikeText(buf);
+            if (!sniffed && (head || !typeOk)) {
+              throw new Error(`非媒体响应：${type || '(没有 content-type)'}${head ? '，正文开头：' + head : ''}`);
+            }
+          }
           size += buf.length;
           if (size > this.maxFileBytes) throw new Error('超过单文件上限，放弃缓存');
           fs.writeSync(fh, buf);
@@ -263,7 +318,8 @@ class MediaCache {
       this.index.set(key, rec);
       this._invalidate();
       await this.evictIfNeeded();
-      this.log(`[cache] 已缓存 ${rec.name || key}（${(size / 1048576).toFixed(1)} MB）`);
+      this.log(`[cache] 已缓存 ${rec.name || key}（${(size / 1048576).toFixed(1)} MB）`
+        + (sniffed && !typeOk ? `（CDN 把 ${sniffed} 标成了 ${type || '无类型'}）` : ''));
       return { ok: true, size, file: bin };
     } catch (e) {
       try { if (fs.existsSync(part)) fs.unlinkSync(part); } catch { /* 忽略 */ }

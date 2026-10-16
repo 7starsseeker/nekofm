@@ -162,6 +162,34 @@ class LocalLibrary {
 
   // ---------------------------------------------------------------- 歌词
   /**
+   * 找同名旁车歌词文件（大小写不敏感地找一遍）。
+   *
+   * 命名约定**只写在这一处**：读（`lyrics`）与删（`dropSidecarLyrics`）必须认
+   * 同一批文件，各写一遍迟早走样。
+   *   · <base>.lrc          标准歌词（兼容其它播放器）—— **首选**
+   *   · <base>.karaoke.lrc  旧版逐字文件：逐字显示已下线，但**仍读它**，
+   *     兼容以前落过盘的歌（它的正文与标准版一致，只是多了行内时间戳）
+   *   · <base>.trans.lrc    翻译
+   * @returns {{lrcPath:string|null, karaokePath:string|null, transPath:string|null}}
+   */
+  _sidecarPaths(file) {
+    const dir = path.dirname(file);
+    const base = path.basename(file, path.extname(file));
+    const out = { lrcPath: null, karaokePath: null, transPath: null };
+    try {
+      for (const e of fs.readdirSync(dir)) {
+        const ext = path.extname(e).toLowerCase();
+        if (!LRC_EXT.has(ext)) continue;
+        const stem = path.basename(e, path.extname(e)).toLowerCase();
+        if (stem === base.toLowerCase()) out.lrcPath = path.join(dir, e);
+        else if (stem === (base + '.karaoke').toLowerCase()) out.karaokePath = path.join(dir, e);
+        else if (stem === (base + '.trans').toLowerCase()) out.transPath = path.join(dir, e);
+      }
+    } catch { /* 目录不可读 */ }
+    return out;
+  }
+
+  /**
    * 取本地歌词。返回 {lrc, tlyric, source}。
    * 顺序：同名 .lrc → .trans.lrc 翻译 → 内嵌标签
    *
@@ -170,27 +198,7 @@ class LocalLibrary {
    * 按 UTF-8 硬读会得到满屏乱码（见 core/text-file.js 里的实测数据）。
    */
   async lyrics(file) {
-    const dir = path.dirname(file);
-    const base = path.basename(file, path.extname(file));
-
-    // 1) 同名 .lrc（大小写不敏感地找一遍）
-    //    · <base>.lrc          标准歌词（兼容其它播放器）—— **首选**
-    //    · <base>.karaoke.lrc  旧版逐字文件：逐字显示已下线，但**仍读它**，
-    //      兼容以前落过盘的歌（它的正文与标准版一致，只是多了行内时间戳）
-    //    · <base>.trans.lrc    翻译
-    let lrcPath = null;
-    let karaokePath = null;
-    let transPath = null;
-    try {
-      for (const e of fs.readdirSync(dir)) {
-        const ext = path.extname(e).toLowerCase();
-        if (!LRC_EXT.has(ext)) continue;
-        const stem = path.basename(e, path.extname(e)).toLowerCase();
-        if (stem === base.toLowerCase()) lrcPath = path.join(dir, e);
-        else if (stem === (base + '.karaoke').toLowerCase()) karaokePath = path.join(dir, e);
-        else if (stem === (base + '.trans').toLowerCase()) transPath = path.join(dir, e);
-      }
-    } catch { /* 目录不可读 */ }
+    const { lrcPath, karaokePath, transPath } = this._sidecarPaths(file);
 
     if (lrcPath || karaokePath) {
       // 现在逐字不渲染了，所以**标准版优先**（内容一样，还省一次内联时间戳解析）；
@@ -247,6 +255,39 @@ class LocalLibrary {
       }
     }
     return { ok: true, written, skipped };
+  }
+
+  /**
+   * 删掉这首歌的**旁车歌词文件**（`<base>.lrc` / `<base>.trans.lrc`）。
+   *
+   * 只在用户明确说"这份歌词是错的，删掉"时调用（`engine.lyricAutoBan`）
+   * —— 也就是控制台歌词条上的「歌词配错 ✕」。
+   *
+   * ⚠️ **这里删的可能是用户自己放的歌词**：`saveLyrics` 从不覆盖已有文件，
+   * 所以磁盘上无法区分"我们匹配写入的"和"用户从别处拷来的"。
+   * "本地曲一并删掉"是用户在 2026-10-16 明确选的取舍。
+   * 旧版 `<base>.karaoke.lrc` **不删**（超出用户确认的范围），
+   * 它会被只读不删地留在原地 —— 但拉黑之后 `lyrics()` 根本不会被调用。
+   *
+   * @returns {{ok:boolean, removed:string[], errors:Array<{path:string,msg:string}>, kept:string[], msg?:string}}
+   */
+  dropSidecarLyrics(file) {
+    const out = { ok: true, removed: [], errors: [], kept: [] };
+    if (!file) { out.ok = false; out.msg = '没有文件路径'; return out; }
+    const { lrcPath, transPath, karaokePath } = this._sidecarPaths(file);
+    if (karaokePath) out.kept.push(karaokePath);
+    for (const p of [lrcPath, transPath]) {
+      if (!p) continue;
+      try {
+        fs.unlinkSync(p);
+        out.removed.push(p);
+        this.log(`[local] 已删除旁车歌词：${path.basename(p)}`);
+      } catch (e) {
+        out.ok = false;
+        out.errors.push({ path: p, msg: e.message });
+      }
+    }
+    return out;
   }
 
   /** 内嵌标签（ffmpeg 的 ffmetadata 会把 lyrics/unsyncedlyrics 打出来） */

@@ -348,6 +348,28 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
       case 'cacheSongFetch': return engine.cacheFetch(cmd.song);
       /** 只清歌词、保留音频（音频几十 MB 要重下，歌词删了几乎零代价） */
       case 'cacheClearLyrics': return engine.cacheClearLyrics();
+      /**
+       * 「歌词配错 ✕」（2026-10-16）：删掉这首歌的歌词（磁盘缓存 + 本地旁车 .lrc）
+       * 并禁止它再自动匹配。名单落在 `config.lyrics.banned` → 必须落盘。
+       * 不传 song 就是对**当前正在播的**那一首（歌词条上的按钮走这条）。
+       */
+      case 'lyricAutoBan': {
+        const r = engine.lyricAutoBan(cmd.song || null);
+        if (r.ok) saveConfig(engine.config);
+        return r;
+      }
+      /** 恢复某一首的自动匹配（key 从 state().lyric.banKey / state().lyricBan.list 拿） */
+      case 'lyricAutoUnban': {
+        const r = engine.lyricAutoUnban(cmd.key);
+        if (r.ok) saveConfig(engine.config);
+        return r;
+      }
+      /** 全部恢复 */
+      case 'lyricAutoBanClear': {
+        const r = engine.lyricAutoBanClear();
+        if (r.ok) saveConfig(engine.config);
+        return r;
+      }
       /** 按缓存键批量删除（缓存列表勾选删除） */
       case 'cacheDropKeys': return engine.cacheDropKeys(cmd.keys || []);
       /** dryRun=true 只统计（界面先告知"将清理 N 首 / X MB"，确认后再真删） */

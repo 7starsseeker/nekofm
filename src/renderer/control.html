@@ -574,6 +574,22 @@
       <b>缓存 / 删缓存</b> 按钮（已缓存的会显示绿色角标）。</div>
     <div class="tip" id="cacheListInfo"></div>
     <ul id="cacheList" class="q" style="max-height:420px;overflow:auto"></ul>
+
+    <!--
+      被禁止自动匹配歌词的曲目（2026-10-16）。
+      「只清歌词」是"清干净、下次重新匹配"，这里相反：**这份词就是错的，
+      而且每次重新匹配还是会匹配到错的那份** —— 所以拉黑，一个来源都不查。
+    -->
+    <div class="row">
+      <span id="lyricBanStat" class="tip">自动匹配歌词：没有被禁的曲目</span>
+      <button id="btnLyricBanClear" title="把名单清空，所有曲目都恢复自动匹配歌词（正在播的那首会立刻重新取一次词）">全部恢复</button>
+    </div>
+    <ul id="lyricBanList" class="q scroll" style="max-height:160px"></ul>
+    <div class="tip">歌词配错时（自动匹配到了别的版本、后半段对不上），点底部歌词条上的
+      <b>「歌词配错 ✕」</b>：那份词会被删掉，并且这首歌<b>以后不再查任何自动来源</b>
+      （原平台歌词 / B站字幕 / 按歌名匹配），显示"无歌词"。本地曲目会连同名
+      <b>.lrc / .trans.lrc</b> 一起删（注意：分不清是你自己放的还是匹配写的）。
+      音频缓存不动。<b>「只清歌词」管不了这种</b> —— 它清完下次还会匹配到同一份错的。</div>
   </div>
 
   <!-- 测试中心 -->
@@ -871,6 +887,13 @@
     <div class="ls-line ls-next" id="lsNext"></div>
   </div>
   <div class="ls-tools">
+    <!--
+      歌词配错（2026-10-16）：自动匹配到的词是另一首歌/另一个版本时（用户实测
+      "前半段还对得上、后半段文本完全不是这首"），**配错比没有更糟**。
+      点一下 = 删掉这份词（磁盘缓存；本地曲连同名 .lrc / .trans.lrc）
+      + 禁止这首歌以后再自动匹配；再点一次恢复（立刻重取一次词）。
+    -->
+    <button id="btnLyricMismatch" disabled>歌词配错 ✕</button>
     <button id="btnLyricClose" title="隐藏歌词条（可以随时用播放器上的「歌词」按钮再打开）">收起</button>
   </div>
 </div>

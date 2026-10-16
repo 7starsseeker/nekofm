@@ -102,6 +102,16 @@
     while (logBox.childElementCount > 200) logBox.lastElementChild.remove();
   }
   window.__nekofmLog = log;   // 供其它 IIFE（新版面板）写日志用
+  /**
+   * 同理把 toast 也暴露出去。
+   *
+   * 为什么必须暴露（2026-10-16 用户实测）：`newPanels()` 那个 IIFE 里 9 处
+   * 都写了 `toast(...)`，但 `toast` 只在这个 IIFE 里定义 —— 严格模式下
+   * 那是 `ReferenceError: toast is not defined`。而它**几乎总是出现在
+   * `await 某命令` 之后、`onChanged()` 之前**，异常一抛，后面的刷新就没了：
+   * 「缓存」按钮因此永远停在"缓存中…"（缓存成功与否都停）。
+   */
+  window.__nekofmToast = toast;
 
   let config = null;
   let state = null;
@@ -484,6 +494,8 @@
     // 黑名单与已导入歌单（低频变化，但列表不长，随状态一起刷即可）
     renderBlacklist(s.blacklist);
     renderImported(s.playlists);
+    // 「歌词配错」按钮 + 被禁名单（2026-10-16）：低频变化，同样随状态刷
+    renderLyricBan(s.lyric, s.lyricBan);
 
     // 播放器：模式 / 静音 / 收藏 / 闲时 / 缓存
     if (s.player) {
@@ -1396,6 +1408,101 @@
   on('btnBlClear', 'click', async () => {
     const r = await api({ action: 'blacklistClear' });
     log('info', `已清空黑名单（${(r.result && r.result.count) || 0} 条）`);
+  });
+
+  // ---- 歌词配错（2026-10-16）
+  /** 被禁名单里显示"来源"用；跟 engine 的 SOURCE_LABEL 是两码事（这里只管三个值） */
+  const LYRIC_SRC_TXT = { netease: '网易云', bilibili: 'B站', local: '本地' };
+
+  /**
+   * 底部歌词条上那颗按钮 + 「在线缓存」卡片里的被禁名单。
+   *
+   * 跑在 10Hz 的状态广播里，所以**内容没变就不重建 DOM**（跟 renderBlacklist
+   * 同一个道理：每条按钮每秒被重建 10 次，点击就会丢，也会白白压住主线程）。
+   */
+  function renderLyricBan(lyric, ban) {
+    const list = (ban && ban.list) || [];
+    const stat = $('lyricBanStat');
+    if (stat) stat.textContent = list.length ? `已禁止自动匹配的曲目：${list.length}` : '自动匹配歌词：没有被禁的曲目';
+
+    const btn = $('btnLyricMismatch');
+    if (btn) {
+      const banned = !!(lyric && lyric.banned);
+      const key = (lyric && lyric.banKey) || '';
+      const label = banned ? '恢复自动匹配' : '歌词配错 ✕';
+      if (btn.textContent !== label) btn.textContent = label;
+      // 没有在播曲目（或算不出标识）时不可点 —— 点了也不知道该删谁的词
+      btn.disabled = !key;
+      btn.title = banned
+        ? '这首歌已被禁止自动匹配歌词（那份词已经删了）。点一下恢复：马上重新取一次歌词。'
+        : '这份歌词配错了（比如配上了别的版本、后半段对不上）？点一下删掉它，并禁止这首歌以后再自动匹配。';
+    }
+
+    const ul = $('lyricBanList');
+    if (!ul) return;
+    const sig = list.map((e) => `${e.key}:${e.addedAt}`).join('|');
+    if (ul.dataset.sig === sig) return;
+    ul.dataset.sig = sig;
+    ul.innerHTML = '';
+    if (!list.length) {
+      ul.innerHTML = '<li><span class="tip">没有被禁的曲目。歌词配错时点底部歌词条上的「歌词配错 ✕」。</span></li>';
+      return;
+    }
+    list.forEach((e) => {
+      const li = document.createElement('li');
+      li.innerHTML = `<span class="nm" title="${escapeHtml(e.name || e.key)}">${escapeHtml(e.name || e.key)}</span>`
+        + `<span class="by">${escapeHtml(LYRIC_SRC_TXT[e.source] || e.source || '')}</span>`;
+      const b = document.createElement('button');
+      b.textContent = '恢复';
+      b.onclick = async () => {
+        const r = await api({ action: 'lyricAutoUnban', key: e.key });
+        const res = r.result || {};
+        toast(!!res.ok, res.ok ? `已恢复《${e.name || e.key}》的自动匹配歌词` : (res.msg || '恢复失败'));
+      };
+      li.appendChild(b);
+      ul.appendChild(li);
+    });
+  }
+
+  on('btnLyricMismatch', 'click', async () => {
+    const s = state || {};
+    const lyric = s.lyric || {};
+    const name = (s.track && (s.track.name || s.track.title)) || '当前曲目';
+
+    // 已经禁过 → 这颗按钮变成"恢复"
+    if (lyric.banned) {
+      const r = await api({ action: 'lyricAutoUnban', key: lyric.banKey });
+      const res = r.result || {};
+      toast(!!res.ok, res.ok ? `已恢复《${name}》的自动匹配歌词，正在重新取词…` : (res.msg || '恢复失败'));
+      return;
+    }
+
+    const yes = await confirmDialog(
+      `把《${name}》的歌词删掉，并且以后不再自动匹配？\n\n`
+      + '· 删掉这份歌词（磁盘缓存；本地曲目会连同名 .lrc / .trans.lrc 一起删）\n'
+      + '· 之后播放它不再查任何自动来源（原平台歌词 / B站字幕 / 按歌名匹配），显示"无歌词"\n'
+      + '· 音频缓存不动；「在线缓存」卡片里可以随时恢复',
+    );
+    if (!yes) return;
+
+    const r = await api({ action: 'lyricAutoBan' });
+    const res = r.result || {};
+    if (!res.ok) { toast(false, '操作失败：' + (res.msg || '未知原因')); return; }
+    toast(true, `已删除《${res.name || name}》的歌词并禁止自动匹配${
+      res.files && res.files.length ? `（连带删掉 ${res.files.length} 个旁车文件）` : ''}`);
+    if (res.fileErrors && res.fileErrors.length) {
+      toast(false, '旁车歌词删除失败：' + res.fileErrors.map((e) => `${e.path}（${e.msg}）`).join('；'));
+    }
+  });
+
+  on('btnLyricBanClear', 'click', async () => {
+    const n = (state && state.lyricBan && state.lyricBan.total) || 0;
+    if (!n) { log('info', '没有被禁的曲目'); return; }
+    const yes = await confirmDialog(`把 ${n} 条「禁止自动匹配歌词」全部恢复？\n\n以后播放它们会重新联网匹配歌词（正在播的那首会立刻重取一次）。`);
+    if (!yes) return;
+    const r = await api({ action: 'lyricAutoBanClear' });
+    const res = r.result || {};
+    toast(!!res.ok, res.ok ? `已恢复 ${res.removed || 0} 首的自动匹配歌词` : (res.msg || '恢复失败'));
   });
 
   // ---- 播放器信息栏
@@ -2334,6 +2441,10 @@
   const call = (body) => fetch('/api/command', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then((r) => r.json()).catch(() => ({}));
+  /** `toast` 定义在上面那个 IIFE 里（本 IIFE 里写 `toast(...)` 会直接抛异常，见 __nekofmToast 的注释） */
+  const toast = (ok, text) => window.__nekofmToast(ok, text);
+  /** 同上：`__nekofmConfirm` 早就暴露好了，这里一直没人接（2026-10-16 发现「删缓存」按钮点了没反应就是这个） */
+  const confirmDialog = (message) => window.__nekofmConfirm(message);
 
   const fmt = (s) => {
     s = Math.max(0, Math.floor(s || 0));
@@ -2371,25 +2482,55 @@
       const tip = full
         ? `已缓存：音频 ${cache.audio.mb}MB + 歌词 ${cache.lyrics.lines} 行 —— 点一下删除`
         : `点一下立刻缓存（音频${hasAudio ? '已有' : '待下'}${hasLyric ? ' / 歌词已有' : ' / 歌词待匹配'}）`;
-      const b = mk(full ? '已缓存 ✓' : (hasAudio || hasLyric ? '补缓存' : '缓存'), tip, async () => {
+      /**
+       * 按钮文字留一份在闭包里：点完要能还原 —— 列表刷新是异步的，
+       * 万一中间抛异常就再也没人把它改回来了。
+       * 2026-10-16 用户实测的「点补缓存卡在缓存中…」就是这么来的：
+       * 响应回来后的 `toast(...)` 抛 `toast is not defined`，把后面的 `onChanged()` 一起带走了。
+       * 现在两处都补上：toast 能用了，刷新也放进 finally（抛了照样还原 + 刷新）。
+       */
+      const label = full ? '已缓存 ✓' : (hasAudio || hasLyric ? '补缓存' : '缓存');
+      const b = mk(label, tip, async () => {
+        const done = () => { b.textContent = label; b.disabled = false; onChanged && onChanged(); };
         if (full) {
           if (!await confirmDialog(`删除《${it.name || ''}》的缓存？\n\n音频 ${cache.audio.mb}MB 会被删掉，下次播放要重新联网取。`)) return;
-          const r = await call({ action: 'cacheSongDrop', song: it.song });
-          const d = (r && r.result) || {};
-          if (d.ok) toast(true, `已删除缓存（音频 ${d.audio && d.audio.ok ? '✓' : '未删'}，歌词 ${d.lyrics && d.lyrics.ok ? '✓' : '未删'}）`);
-          else toast(false, (d.audio && d.audio.msg) || '删除失败');
+          try {
+            const r = await call({ action: 'cacheSongDrop', song: it.song });
+            const d = (r && r.result) || {};
+            if (d.ok) toast(true, `已删除缓存（音频 ${d.audio && d.audio.ok ? '✓' : '未删'}，歌词 ${d.lyrics && d.lyrics.ok ? '✓' : '未删'}）`);
+            else toast(false, (d.audio && d.audio.msg) || '删除失败');
+          } finally { done(); }
         } else {
           b.textContent = '缓存中…';
           b.disabled = true;
-          const r = await call({ action: 'cacheSongFetch', song: it.song });
-          const d = (r && r.result) || {};
-          const parts = [];
-          if (d.audio && d.audio.ok && d.audio.skipped !== 'already') parts.push(`音频 ${((d.audio.size || 0) / 1048576).toFixed(1)}MB`);
-          if (d.lyrics && d.lyrics.ok && d.lyrics.skipped !== 'already') parts.push('歌词');
-          toast(parts.length > 0, parts.length ? `已缓存：${parts.join(' + ')}`
-            : `没有新增内容（音频：${(d.audio && (d.audio.msg || d.audio.skipped)) || '?'}；歌词：${(d.lyrics && (d.lyrics.msg || d.lyrics.skipped)) || '?'}）`);
+          try {
+            const r = await call({ action: 'cacheSongFetch', song: it.song });
+            const d = (r && r.result) || {};
+            if (r && r.ok === false) {
+              // 命令本身没跑起来（服务端 500，比如 B站链接失效）：把原因原样说出来，
+              // 别只报一个"?"（2026-10-16 实测坏链接就是这种情况）
+              toast(false, `缓存失败：${r.error || '服务端没有返回原因'}`);
+            } else {
+              /**
+               * 两侧都报 —— 用户要求「匹配不到歌词时不要停在半截，要明确说没匹配到」
+               * （2026-10-16）。只报成功的那半，会让"音频成了、歌词没匹配到"
+               * 看起来像卡住了；`na`（本地曲目不需要缓存音频）不算失败。
+               */
+              const side = (o, label) => {
+                if (!o) return `${label}：?`;
+                if (o.na) return `${label}：不需要`;
+                if (o.ok && o.skipped === 'already') return `${label}：已有`;
+                if (o.ok) return `${label}：已缓存${o.size ? ` ${(o.size / 1048576).toFixed(1)}MB` : ''}`;
+                return `${label}：${o.msg || o.skipped || '失败'}`;
+              };
+              const missing = (o) => !o || !(o.ok || o.na);
+              const aTxt = side(d.audio, '音频');
+              const lTxt = side(d.lyrics, '歌词');
+              const bad = missing(d.audio) || missing(d.lyrics);
+              toast(!bad, bad ? `${aTxt}；${lTxt}（下次点「补缓存」会再检测一次）` : `${aTxt}；${lTxt}`);
+            }
+          } finally { done(); }
         }
-        onChanged && onChanged();
       });
       if (full) b.style.borderColor = '#2c8a4b';
       li.appendChild(b);
@@ -2457,7 +2598,11 @@
        * 缓存角标（2026-09-26）：服务端在返回列表时已经算好 `it.cache`，
        * 这里只是画出来 —— 用户一眼能看出哪些歌已经能离线播。
        *   · 音频 + 歌词都有 → 绿色「已缓存」
-       *   · 只有一个     → 灰色「半缓存」
+       *   · 只有一个     → 灰色「半缓存（无歌词）」/「半缓存（无音频）」
+       *
+       * 2026-10-16 用户要求：**缺的那一半要说清是哪一半**。原来只写「半缓存」，
+       * 而"音频已缓存、歌词没匹配到"是最常见的情况（尤其 B站视频），
+       * 用户看到的就是"状态停在半截、不知道歌词怎么了"。
        */
       let badge = '';
       const c = it.cache;
@@ -2465,7 +2610,7 @@
         const a = c.audio && c.audio.cached;
         const l = c.lyrics && c.lyrics.cached;
         if (a && l) badge = `<span class="cache-badge ok" title="音频 ${c.audio.mb}MB + 歌词 ${c.lyrics.lines} 行，已能离线播放">已缓存</span>`;
-        else if (a || l) badge = `<span class="cache-badge half" title="${a ? `音频已缓存 ${c.audio.mb}MB` : '歌词已缓存'}，另一半还缺">半缓存</span>`;
+        else if (a || l) badge = `<span class="cache-badge half" title="${a ? `音频已缓存 ${c.audio.mb}MB，歌词没匹配到 —— 下次点「补缓存」会再检测一次` : '歌词已缓存，音频还没下 —— 下次点「补缓存」会再试一次'}">半缓存（${a ? '无歌词' : '无音频'}）</span>`;
         else badge = '<span class="cache-badge none" title="还没有缓存，播放时要联网取">未缓存</span>';
       }
       li.innerHTML = `<span class="idx">${i + 1}</span><span class="nm" title="${esc(it.name)}">${esc(it.name || '—')}</span>`

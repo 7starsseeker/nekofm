@@ -79,6 +79,9 @@
     "enabled": true,
     "rules": []
   },
+  "lyrics": {
+    "banned": []
+  },
   "playlists": {
     "imported": []
   },

@@ -120,6 +120,27 @@ const DEFAULT_CONFIG = {
     rules: [],   // [{id, type:'song'|'keyword'|'artist'|'bvid', value, note, addedAt}]
   },
 
+  /**
+   * 歌词：**「这首歌别自动匹配歌词了」名单**（2026-10-16）。
+   *
+   * 背景：B站视频 / 本地曲目没有自带歌词时，会拿歌名去网易云匹配
+   * （`engine._matchNetease`）。标题相似就命中，于是会配错 —— 用户实测过
+   * "配上了别的版本，前半段对得上、后半段文本完全不是这首歌"。
+   * 这种情况**比没有歌词更糟**：画面上挂着一段不属于它的词。
+   *
+   * 所以控制台歌词条上放了「歌词配错 ✕」：点一下把这份歌词删掉
+   * （磁盘缓存；本地曲连同名 `.lrc` / `.trans.lrc`），并把这首歌记进来 ——
+   * 之后播放它**一个自动来源都不查**（原平台歌词 / B站字幕 / 按歌名匹配），
+   * 直接显示"无歌词"。在「在线缓存」卡片里可以随时恢复。
+   *
+   * `banned: [{key, name, source, addedAt}]`
+   *   key 与缓存键同源：`netease-<id>` / `bilibili-<bvid>-<cid>`；
+   *   本地曲用 `local:<文件绝对路径（小写）>` —— 比歌名精确，同名文件是两首歌。
+   */
+  lyrics: {
+    banned: [],
+  },
+
   // 已导入的网易云歌单（持久化记录，便于一键重新入队）
   playlists: {
     imported: [], // [{id, name, cover, trackCount, importedAt, lastQueuedAt}]

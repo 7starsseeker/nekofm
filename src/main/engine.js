@@ -2635,6 +2635,13 @@ class Engine extends EventEmitter {
        */
       lyricPromise.then((lyrics) => {
         if (stale()) return;
+        /**
+         * 落地时**再查一次黑名单**（2026-10-16）：用户可能在"歌词正在取"
+         * 这几百毫秒里点了「歌词配错 ✕」—— 那次请求已经在飞，
+         * 直接贴上去会把刚被删掉的错词又挂回歌词条（而且 source 会被写成
+         * 匹配来源，看起来像是"拉黑没生效"）。
+         */
+        if (lyrics && this.lyricBanFor(song)) return;
         if (lyrics) {
           this.lyricTimeline = lyrics.timeline;
           this.lyricSource = lyrics.source;
@@ -2791,6 +2798,24 @@ class Engine extends EventEmitter {
   }
   /** 曲目 → 歌词时间轴（三级来源：原平台 → 同名匹配 → B站字幕） */
   async resolveLyrics(song) {
+    /**
+     * **被用户拉黑的曲目：一个来源都不查**（2026-10-16）。
+     *
+     * 放在最前面、`_takePreload` 之前 —— 预载表里可能正躺着那份配错的歌词，
+     * 先取预载就等于白拉黑一次。
+     *
+     * 返回 null 跟"这首歌本来就没有歌词"走完全同一条路：界面会显示
+     * `无歌词：<原因>`（见 `state().lyric.diag`），而不是静默地什么都不给。
+     */
+    const ban = this.lyricBanFor(song);
+    if (ban) {
+      this.lastLyricDiag = {
+        song: song.name || song.title,
+        reason: '这份歌词被你删掉了，且已禁止再次自动匹配（控制台「在线缓存」卡片里可恢复）',
+      };
+      return null;
+    }
+
     // 预载命中：直接用（见 constructor 里的 _preload 说明）
     const pre = this._takePreload(song, 'lyrics');
     if (pre) return pre;
@@ -3093,6 +3118,169 @@ class Engine extends EventEmitter {
     return r.removed || 0;
   }
 
+  // ================================================ 「歌词配错了」：删掉 + 禁止再自动匹配（2026-10-16）
+  /**
+   * 拉黑身份 —— **与缓存键同源**（`netease-<id>` / `bilibili-<bvid>-<cid>`），
+   * 但**本地曲用文件路径**而不是歌名。
+   *
+   * 为什么本地曲不用 `lyricKeyFor` 那个 `match-<歌名>`：那是"按歌名匹配"的缓存槽，
+   * 同名文件共用它。播放列表里"同名不同版本"很常见（原版 / Live 版），
+   * 拉黑一个不该把另一个也变成哑巴。
+   *
+   * 因此**算不出来就返回 null，不退化成按歌名记名** —— 那种条目在
+   * `resolveLyrics` 里根本匹配不上真正的本地曲（它算出来的是 `local:<路径>`），
+   * 只会骗用户一句"已禁止"然后什么都没发生。宁可如实报错。
+   *
+   * B站曲目不用担心 cid 还没解析：`resolveStream` 一律先 `_ensureBiliCid`
+   * 再算键（见 resolveStream 里那行注释），而按钮只作用于**正在播的那首**，
+   * 所以点的时候 cid 必然已经在曲目对象上了。这里**故意不做** bvid 前缀模糊匹配 ——
+   * 同一个视频不同分 P 是 cid 不同的两首歌，模糊匹配会把无辜的那一 P 一起静音。
+   */
+  lyricBanKey(song) {
+    if (!song) return null;
+    if (song.source === 'local' && song.file) return 'local:' + String(song.file).toLowerCase();
+    return this.cache.keyFor(song) || null;
+  }
+
+  /** 名单（浅拷贝，界面拿不到 config 内部对象的引用） */
+  lyricBanList() {
+    const l = (this.config.lyrics && this.config.lyrics.banned) || [];
+    return l.map((e) => ({ key: e.key, name: e.name, source: e.source, addedAt: e.addedAt }));
+  }
+
+  /** 这一首是否在名单里（命中返回那条记录，否则 null） */
+  lyricBanFor(song) {
+    const key = this.lyricBanKey(song);
+    if (!key) return null;
+    const l = (this.config.lyrics && this.config.lyrics.banned) || [];
+    return l.find((e) => e && e.key === key) || null;
+  }
+
+  /**
+   * 名单写回 config，交给上层持久化（与 syncBlacklistToConfig 同款）。
+   *
+   * ⚠️ **整段换成一个新对象，绝不原地改 `config.lyrics.banned`。**
+   * `deepMerge` 是**浅拷贝**（src/core/config.js 里 `const out = { ...base }`），
+   * 老用户的 config.json 里还没有 `lyrics` 段时，`engine.config.lyrics` 与模块级的
+   * `DEFAULT_CONFIG.lyrics` **是同一个对象** —— 往里 push / splice 就是改全局默认值，
+   * 同一进程里下一个 Engine（测试、演练模式、工具脚本）会莫名继承上一个实例的禁令。
+   * 换掉整个对象只动 `engine.config` 这一层（deepMerge 的产物是自己的），默认值不受影响。
+   *
+   * @param {Array=} next 新的完整名单；不给就是"取一份当前名单的副本"。
+   */
+  syncLyricBanToConfig(next) {
+    const prev = this.config.lyrics && typeof this.config.lyrics === 'object' ? this.config.lyrics : {};
+    const banned = Array.isArray(next) ? next : (Array.isArray(prev.banned) ? prev.banned.slice() : []);
+    this.config.lyrics = { ...prev, banned };
+    return this.config.lyrics;
+  }
+
+  /**
+   * 「歌词配错 ✕」：删掉这首歌的歌词 + 禁止它再自动匹配。
+   *
+   * 三步，哪一步不干净都如实回报（界面写进右下角日志）：
+   *   1) 删**歌词**磁盘缓存 —— **音频缓存一点不动**（用户只是不认这份词，
+   *      音频几十 MB 没必要重下）
+   *   2) 本地曲：同名旁车 `.lrc` / `.trans.lrc` 一并删掉（用户 2026-10-16 选的取舍；
+   *      旧版 `.karaoke.lrc` 不删，见 LocalLibrary.dropSidecarLyrics）
+   *   3) 记进 `config.lyrics.banned`；如果正在播的就是这首，**立刻**清空歌词显示
+   *
+   * @param {object} [song] 缺省 = 当前曲目
+   */
+  lyricAutoBan(song = null) {
+    song = song || this.track;
+    if (!song) return { ok: false, msg: '当前没有播放曲目' };
+    const key = this.lyricBanKey(song);
+    if (!key) return { ok: false, msg: '算不出这首歌的标识（缺 id / bvid / 文件路径）' };
+    const name = song.name || song.title || '这首';
+    const out = { ok: true, key, name, source: song.source, cacheRemoved: false, files: [], fileErrors: [], kept: [], duplicate: false, cleared: false };
+
+    // 1) 歌词磁盘缓存（音频缓存不碰）
+    const lk = this.cache.lyricKeyFor(song);
+    if (lk) out.cacheRemoved = !!this.cache.removeLyrics(lk).ok;
+
+    // 2) 本地旁车文件
+    if (song.source === 'local' && song.file && this.local.dropSidecarLyrics) {
+      const r = this.local.dropSidecarLyrics(song.file);
+      out.files = r.removed;
+      out.fileErrors = r.errors;
+      out.kept = r.kept || [];
+    }
+
+    // 3) 记名单（幂等：重复点只更新名字）
+    const list = this.syncLyricBanToConfig().banned.slice();
+    const dupAt = list.findIndex((e) => e && e.key === key);
+    if (dupAt >= 0) { out.duplicate = true; list[dupAt] = { ...list[dupAt], name }; }
+    else list.push({ key, name, source: song.source, addedAt: Date.now() });
+    this.syncLyricBanToConfig(list);
+
+    // 正在播的就是这首 → 立刻清空（不然要等下一首才生效，看着像"没反应"）
+    if (this.track && this.lyricBanKey(this.track) === key) {
+      this.lyricTimeline = { meta: {}, lines: [] };
+      this.lyricSource = 'none';
+      this.lastLyricDiag = { song: name, reason: '这份歌词被你删掉了，且已禁止再次自动匹配（控制台「在线缓存」卡片里可恢复）' };
+      this.lyricRev++;
+      out.cleared = true;
+    }
+    this.notify('info', `已删除《${name}》的歌词并禁止自动匹配${out.files.length ? `（连带删掉 ${out.files.length} 个旁车文件）` : ''}`);
+    this.emit('change');
+    return out;
+  }
+
+  /**
+   * 恢复某一首的自动匹配（「歌词配错」的反操作）。
+   *
+   * **会自动重取歌词**（只对"正在播的那一首"）：用户点「恢复」时的期待是
+   * "词回来"，而不是"下次播放再说"。取词是网络动作，所以**不占着命令通道** ——
+   * 立刻返回 ok，重新取词在后台跑（拿 `_loadSeq` + `this.track` 判断有没有过期）。
+   */
+  lyricAutoUnban(key) {
+    const list = this.syncLyricBanToConfig().banned.slice();
+    const i = list.findIndex((e) => e && e.key === key);
+    if (i < 0) return { ok: false, msg: '名单里没有这一条（可能已经被恢复了）' };
+    const [removed] = list.splice(i, 1);
+    this.syncLyricBanToConfig(list);
+    const cur = this.track && this.lyricBanKey(this.track) === key;
+    if (cur) this._refetchLyricsForCurrent().catch(() => { /* 取不到就算了，界面会显示原因 */ });
+    this.emit('change');
+    return { ok: true, removed, refetch: !!cur };
+  }
+
+  /** 一键恢复全部（正在播的那首如果在其中，也会重取歌词） */
+  lyricAutoBanClear() {
+    const list = this.syncLyricBanToConfig().banned;
+    const n = list.length;
+    const curKey = this.track ? this.lyricBanKey(this.track) : null;
+    const wasCur = !!curKey && list.some((e) => e && e.key === curKey);
+    this.syncLyricBanToConfig([]);
+    if (wasCur) this._refetchLyricsForCurrent().catch(() => { /* 同上 */ });
+    this.emit('change');
+    return { ok: true, removed: n, refetch: wasCur };
+  }
+
+  /**
+   * 给**当前正在播的**那一首重新取一次歌词（恢复自动匹配后用）。
+   * 与 `_play` 里那段"歌词晚到"同一套过期判定：序号或曲目对象变了就丢弃。
+   */
+  async _refetchLyricsForCurrent() {
+    const song = this.track;
+    if (!song) return null;
+    const seq = this._loadSeq;
+    let ly = null;
+    try { ly = await this.resolveLyrics(song); } catch { ly = null; }
+    if (seq !== this._loadSeq || this.track !== song) return null;   // 期间切歌了 → 丢掉
+    if (ly && ly.timeline && (ly.timeline.lines || []).length) {
+      this.lyricTimeline = ly.timeline;
+      this.lyricSource = ly.source;
+    } else {
+      this.lyricSource = 'none';
+      this.lyricTimeline = { meta: {}, lines: [] };
+    }
+    this.lyricRev++;
+    this.emit('change');
+    return ly;
+  }
+
   // ================================================ 单曲缓存管理（2026-09-26）
   /**
    * 某一首的缓存现状。给列表行显示"已缓存 / 无缓存"用。
@@ -3155,7 +3343,9 @@ class Engine extends EventEmitter {
     await this._ensureBiliCid(song);
     const ck = this.cache.keyFor(song);
     if (!ck) {
-      out.audio = { ok: false, msg: '本地曲目不需要缓存' };
+      // `na` = 这一半**不适用**（不是失败）：本地曲目天生不需要缓存音频，
+      // 不该被报成"缺一半"，也不该进失败统计（见下面 side()/half() 的用法）
+      out.audio = { ok: false, na: true, msg: '本地曲目不需要缓存' };
     } else if (this.cache.get(ck)) {
       out.audio = { ok: true, skipped: 'already', msg: '音频已有缓存' };
     } else {
@@ -3176,7 +3366,13 @@ class Engine extends EventEmitter {
 
     // ---- 歌词
     const lk = this.cache.lyricKeyFor(song);
-    if (!lk) {
+    if (this.lyricBanFor(song)) {
+      /**
+       * 被禁的曲目**不该被"手动缓存"悄悄绕过去** —— `resolveLyrics` 会直接返回
+       * null，不拦的话用户只会看到一句莫名其妙的"没匹配到歌词"（2026-10-16）。
+       */
+      out.lyrics = { ok: false, msg: '这首歌已禁止自动匹配歌词（控制台「在线缓存」卡片里可恢复）' };
+    } else if (!lk) {
       out.lyrics = { ok: false, msg: '无法确定歌词缓存键' };
     } else if (this.cache.getLyrics(lk)) {
       out.lyrics = { ok: true, skipped: 'already', msg: '歌词已有缓存' };
@@ -3193,11 +3389,35 @@ class Engine extends EventEmitter {
       }
     }
 
-    const done = [];
-    if (out.audio.ok && out.audio.skipped !== 'already') done.push('音频');
-    if (out.lyrics.ok && out.lyrics.skipped !== 'already') done.push('歌词');
-    if (done.length) this.notify('info', `《${name}》已缓存：${done.join(' + ')}`);
-    else if (!out.audio.ok && !out.lyrics.ok) this.notify('warn', `《${name}》缓存失败：${out.audio.msg}`);
+    /**
+     * 两侧分开汇报 —— **没成的那一半必须说出来**。
+     *
+     * 用户反馈（2026-10-16）：「有些歌/B站视频匹配不到歌词，点补缓存之后状态就停在
+     * 半截」。原来只有"两侧都失败"才吭声，而"音频成了、歌词没匹配到"这种最常见的
+     * 半截只报一句「已缓存：音频」，用户从提示里看不出歌词到底怎么了。
+     * `na`（本地曲目不需要缓存）不算失败，不该被当成"缺一半"。
+     */
+    const side = (o) => {
+      if (!o) return '?';
+      if (o.na) return '不需要';
+      if (o.ok && o.skipped === 'already') return '已有';
+      if (o.ok) return '已缓存';
+      return o.msg || '失败';
+    };
+    const half = (o) => !o || !(o.ok || o.na); // 真缺（不适用不算缺）
+    if (!half(out.audio) && !half(out.lyrics)) {
+      const fresh = [];
+      if (out.audio.ok && out.audio.skipped !== 'already') fresh.push('音频');
+      if (out.lyrics.ok && out.lyrics.skipped !== 'already') fresh.push('歌词');
+      this.notify('info', fresh.length
+        ? `《${name}》已缓存：${fresh.join(' + ')}`
+        : `《${name}》缓存已经是最新的`);
+    } else if (!half(out.audio) || !half(out.lyrics)) {
+      // 半截：说清哪一半没成，并告诉用户还能再试（下次点「补缓存」会重新检测）
+      this.notify('warn', `《${name}》只缓存了一半 —— 音频：${side(out.audio)}；歌词：${side(out.lyrics)}。下次点「补缓存」会再检测一次`);
+    } else {
+      this.notify('warn', `《${name}》缓存失败 —— 音频：${side(out.audio)}；歌词：${side(out.lyrics)}`);
+    }
     this.emit('change');
     return out;
   }
@@ -3718,6 +3938,19 @@ class Engine extends EventEmitter {
 
   /** 高频状态（10Hz 广播用，必须小） */
   state() {
+    /**
+     * 「歌词配错」两处界面要用到的东西（2026-10-16）：
+     *   · `lyric.banned` / `lyric.banKey` —— 歌词条上那颗按钮该显示"删/禁"还是"恢复"
+     *   · `lyricBan` —— 「在线缓存」卡片里的被禁清单（用户自己攒的，通常几条）
+     * 名单短，跟着 10Hz 一起发没有体积问题（黑名单本来也是这么发的）。
+     */
+    const banEntry = this.lyricBanFor(this.track);
+    // ⚠️ `banKey` 必须是**当前曲目**的键，不能只在"已经被禁"时才给：
+    // 歌词条上那颗按钮靠它决定能不能点（`btn.disabled = !key`）。曾经写成
+    // `banEntry ? banEntry.key : ''`，结果**没被禁的曲目永远 disabled** ——
+    // 按钮画出来了却点不动，整个功能从界面上根本够不着（2026-10-16 用浏览器实测发现）。
+    const banKey = this.track ? (this.lyricBanKey(this.track) || '') : '';
+    const banList = this.lyricBanList();
     return {
       type: 'state',
       serverTime: Date.now(),
@@ -3736,6 +3969,13 @@ class Engine extends EventEmitter {
         // netease、行数却是 0 —— 只按 'none' 判断会让用户彻底看不到原因，
         // 只能反馈"这首一直缓存不下来歌词"。
         diag: (this.lyricSource === 'none' || !this.lyricTimeline.lines.length) ? (this.lastLyricDiag || null) : null,
+        /**
+         * 这首歌是不是被用户判了"歌词配错、别再自动匹配了"（2026-10-16）。
+         * 界面靠它决定歌词条那颗按钮是「歌词配错 ✕」还是「恢复自动匹配」。
+         */
+        banned: !!banEntry,
+        /** 当前曲目的拉黑键（不论有没有被禁都给，见上面 banKey 那段注释） */
+        banKey,
       },
       queue: this._queueSnapshot(8),
       /**
@@ -3765,6 +4005,8 @@ class Engine extends EventEmitter {
       },
       playerDevices: this.playerDevices || [],
       blacklist: this.blacklist.list(),
+      /** 被用户禁止自动匹配歌词的曲目（2026-10-16，见 config.lyrics.banned） */
+      lyricBan: { total: banList.length, list: banList },
       /**
        * 已导入歌单**只发摘要**（2026-09-26 瘦身）。
        *

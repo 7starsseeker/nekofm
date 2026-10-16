@@ -22,6 +22,10 @@ data/
 PROGRESS.md
 .zcode/
 .playwright-mcp/
+.codegraph/
+# 根目录上的"当日工作稿 / 对齐工件"（例如 2026-10-13-agc-gates.md）：
+# 它们是过程记录、写着本机绝对路径，属于作者本地的东西，不进版本库。
+20[0-9][0-9]-*.md
 
 # ---- 本机专用清理脚本（依赖作者历史部署路径，对其他人无意义）----
 tools/cleanup-c-drive.js
