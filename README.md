@@ -4,6 +4,7 @@
 [![CI](https://github.com/7starsseeker/nekofm/actions/workflows/ci.yml/badge.svg)](https://github.com/7starsseeker/nekofm/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen)
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
 
 B站直播用的**音乐播放 + 实时歌词**系统。用你自己的网易云 VIP 账号放歌，弹幕点歌，
 歌词逐句同步显示在直播画面上。
