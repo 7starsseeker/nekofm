@@ -297,49 +297,10 @@
       renderList($id('savedList'), items, '还没有已保存的曲目 —— 在任意列表项上点「加入已保存」，或用下面的来源按钮整批加入。');
     }
 
-    // ------------------------------------------------------------------ 直播状态
-    /** 只有两种状态：直播中 / 未直播。切换本身即动作（切到未直播会保存当前列表）。 */
-    function paintLive(streaming, savedCount) {
-      const on = !!streaming;
-      const n = savedCount || 0;
-      for (const [pill, btn] of [['livePill', 'btnToggleLive']]) {
-        const p = $id(pill); const b = $id(btn);
-        if (p) { p.textContent = on ? '直播中' : '未直播'; p.className = 'pill ' + (on ? 'ok' : 'off'); }
-        if (b) b.textContent = on ? '结束直播' : '开始直播';
-      }
-      // 直播中：已保存歌单固定作为闲时歌单 → 屏蔽"单独播放"
-      const pb = $id('btnPlaySaved');
-      if (pb) {
-        pb.disabled = on;
-        pb.title = on ? '直播中：「已保存播放列表」固定作为闲时歌单（当前列表放空后自动接着放）' : '未直播：把它当本地歌单直接播放';
-      }
-      const hint = $id('playSavedHint');
-      if (hint) {
-        hint.textContent = on
-          ? '直播中：它作为闲时歌单自动接着放，不能单独播放'
-          : '未直播时可直接播放';
-      }
-      if ($id('liveStat')) {
-        $id('liveStat').textContent = on
-          ? `正在直播 · 已保存 ${n} 首作为闲时歌单`
-          : `未直播 · 已保存 ${n} 首`;
-      }
-      liveTouched = true;
-    }
-    let liveTouched = false;
-
-    async function setLive(on) {
-      const r = await call({ action: 'setStreaming', on });
-      const d = r.result || {};
-      paintLive(d.streaming != null ? d.streaming : on, d.saved);
-      refreshSaved();
-    }
-    if ($id('btnToggleLive')) $id('btnToggleLive').onclick = async () => {
-      const st = await (await fetch('/api/state')).json();
-      setLive(!st.streaming);
-    };
-    // 直播状态开关只保留「直播状态」卡片里那一个（底栏不再重复）
-    window.__nekofmPaintLive = paintLive;
+    // --- 直播状态：已挪到 face-live.js（段2 第五刀）
+    // 那张「直播状态」卡属于直播台面，逻辑留在曲库模块里是第 4 刀的遗留错误。
+    // 它只通过 __nekofmSyncSaved 这个钩子回来要求刷一次已保存列表，
+    // 不直接调本模块的内部函数 —— 面模块之间不许互相伸手。
 
     if ($id('btnClearHist')) $id('btnClearHist').onclick = async () => { await call({ action: 'clearHistory' }); refreshHistory(); };
     // 待机时把已保存歌单当本地歌单直接播放
@@ -448,6 +409,6 @@
       });
     })();
 
-    return { refreshHistory: refreshHistory, refreshSaved: refreshSaved, paintLive: paintLive };
+    return { refreshHistory: refreshHistory, refreshSaved: refreshSaved };
   };
 })();
