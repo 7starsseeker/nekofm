@@ -430,11 +430,18 @@ class Engine extends EventEmitter {
          * 查一次 room_init 带过来（`liveStatus` 为 null 表示没查到，那就保持未知）。
          */
         this.roomLiveStatus = info.liveStatus == null ? null : info.liveStatus;
+        this._startRoomWatch(info.roomId);
         if (info.liveStatus != null && info.liveStatus !== 1) {
           const what = info.liveStatus === 2 ? '正在轮播' : '未开播';
-          this.notify('warn', `房间 ${info.roomId} ${what}：开放平台长连已建立。`
-            + `B站的官方通道只在开播时投递弹幕，所以现在多半收不到；`
-            + `如果确实收到了，下面的计数会涨（收到即生效，这条提示只是提醒）`);
+          /**
+           * **实测结论（2026-10-25 用户验证）**：开放平台长连在未开播时不投递弹幕 ——
+           * 而同一时刻在网页版直播间里**能**看到别人发的弹幕（那是网页端走的另一条通道）。
+           * 所以这不是我们这侧收得慢，是官方通道的开播闸门。
+           * 给出可执行的出路：切「浏览器通道」（用户实测未开播也能点歌成功）。
+           */
+          this.notify('warn', `房间 ${info.roomId} ${what}：开放平台长连已建立，但这条官方通道`
+            + `**只在开播后投递弹幕**（实测：未开播时网页版能看到弹幕，这里收不到）。`
+            + `现在就想点歌的话，到「设置 · 弹幕点歌」把通道切到「浏览器通道」—— 那条未开播也能收`);
         }
         this.emit('change');
       });
@@ -470,6 +477,7 @@ class Engine extends EventEmitter {
      */
     dc.on('room', (info) => {
       this.roomLiveStatus = info.liveStatus;
+      this._startRoomWatch(info.roomId);
       /**
        * 记下**主播的 uid**（room_init 的 uid 就是房主）—— 判定"主播特权"要用它。
        *
@@ -489,9 +497,9 @@ class Engine extends EventEmitter {
       }
       if (info.liveStatus !== 1) {
         const what = info.liveStatus === 2 ? '正在轮播' : '未开播';
-        this.notify('warn', `房间 ${info.roomId} ${what}：弹幕服务已连上。`
-          + `B站对未开播房间经常不投递弹幕（也可能是没人发），收到一条就会记在「弹幕」计数里 —— `
-          + `收到即生效，这条只是提醒，不是闸门`);
+        this.notify('warn', `房间 ${info.roomId} ${what}：浏览器通道已连上。`
+          + `这条通道不依赖开播状态（实测未开播也能点歌）；`
+          + `注意它靠的是一个真实浏览器会话，比官方通道脆一些，掉线会自动重连`);
       }
       this.emit('change');
     });
@@ -551,6 +559,7 @@ class Engine extends EventEmitter {
      * "没过期"，又把连接建回来 —— 用户会看到"点了断开，它自己又连上了"。
      */
     this._connSeq++;
+    this._stopRoomWatch();
     if (this._danmakuBridge) { try { this._danmakuBridge.stop(); } catch { /* 忽略 */ } this._danmakuBridge = null; }
     if (this.danmaku) {
       this.danmaku.close();
@@ -562,6 +571,61 @@ class Engine extends EventEmitter {
       this._danmakuSeen = 0;   // 下次连接重新采样"弹幕身份"，便于排查
       this.emit('change');
     }
+  }
+
+  /**
+   * **开播状态轮询**（2026-10-25 修）。
+   *
+   * 起因：用户开播后连接官方开放平台通道，控制台里「直播间状态」**一直显示未开播**，
+   * 但弹幕点歌其实是好的。原因就是 `liveStatus` 只在**连接那一刻**查过一次
+   * （`open-live.js:167` 的 `_fetchLiveStatus` / `danmaku.js:98` 的 room_init），
+   * 之后再也不刷新 —— 先连后开播，界面就永远停在"未开播"。
+   *
+   * 这里连上弹幕后每 30 秒查一次，只在**变化时**更新界面并发一条提示：
+   *   - 变 1 → "现在开始收弹幕"
+   *   - 由 1 变其它 → "官方通道会停止投递弹幕"
+   * 断开连接时调用 `_stopRoomWatch()` 收掉。
+   */
+  _startRoomWatch(roomId) {
+    this._stopRoomWatch();
+    if (!roomId) return;
+    const token = Symbol('roomwatch');
+    this._roomWatchToken = token;
+    const tick = () => this._pollRoomLive(roomId, token);
+    this._roomWatchTimer = setInterval(tick, 30000);
+    if (this._roomWatchTimer.unref) this._roomWatchTimer.unref();
+    // 连上后先补查一次，别让用户等满 30 秒才看到真实状态
+    const warm = setTimeout(tick, 1500);
+    if (warm.unref) warm.unref();
+  }
+
+  /**
+   * 查一次开播状态并按需更新（拆出来是为了能被单测直接调用，
+   * 不用等 30 秒定时器）。`token` 用于判断这次查询是否已经过期。
+   */
+  async _pollRoomLive(roomId, token) {
+    if (token !== undefined && this._roomWatchToken !== token) return;
+    let r = null;
+    try { r = await this.bili.roomInfo(roomId); } catch { r = null; }
+    if (token !== undefined && this._roomWatchToken !== token) return;
+    if (!r || !r.ok || r.liveStatus == null) return;
+    if (r.liveStatus === this.roomLiveStatus) return;
+    const prev = this.roomLiveStatus;
+    this.roomLiveStatus = r.liveStatus;
+    this.log(`[engine] 直播间状态 ${prev == null ? '未知' : prev} → ${r.liveStatus}`
+      + `（房间 ${roomId}，轮询发现）`);
+    this.emit('change');
+    if (r.liveStatus === 1) {
+      this.notify('ok', `直播间已开播（房间 ${roomId}）—— 现在开始收弹幕`);
+    } else if (prev === 1) {
+      this.notify('warn', `直播间已下播（房间 ${roomId}）—— 官方通道会停止投递弹幕，`
+        + `想继续点歌请切浏览器通道`);
+    }
+  }
+
+  _stopRoomWatch() {
+    this._roomWatchToken = null;
+    if (this._roomWatchTimer) { clearInterval(this._roomWatchTimer); this._roomWatchTimer = null; }
   }
 
   /**

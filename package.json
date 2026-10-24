@@ -26,7 +26,7 @@
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
-    "test": "node test/shell-faces.test.js && node test/lrc.test.js && node test/text-file.test.js && node test/queue.test.js && node test/blacklist.test.js && node test/netease-playlist.test.js && node test/local.test.js && node test/cache.test.js && node test/lyric-ban.test.js && node test/player.test.js && node test/overlay-window.test.js && node test/overlay-cover.test.js",
+    "test": "node test/shell-faces.test.js && node test/lrc.test.js && node test/text-file.test.js && node test/queue.test.js && node test/blacklist.test.js && node test/netease-playlist.test.js && node test/local.test.js && node test/cache.test.js && node test/lyric-ban.test.js && node test/player.test.js && node test/overlay-window.test.js && node test/overlay-cover.test.js && node test/room-watch.test.js",
     "test:faces": "node test/shell-faces.test.js",
     "test:e2e": "node test/e2e.test.js",
     "test:live": "node test/netease.live.js && node test/bilibili.live.js",

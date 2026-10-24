@@ -745,6 +745,27 @@ class NeteaseClient {
     const r3 = pick(w.ok && w.data.data && w.data.data[0], 'weapi');
     if (r3 && r3.ok) return r3;
 
+    /**
+     * 4) **降级一档再试一次**（2026-10-25）。
+     *
+     * 用户日志里出现过 `[netease] 浏览器取流未成功，回退直连：页面取流无地址（code=200…）`，
+     * 而账号是有 VIP 的 —— 最常见的实际原因是**请求的档位（exhigh）这颗曲目拿不到**，
+     * 但 standard 是有的。以前四个通道都按同一个 level 问，问不到就直接失败，
+     * 白白放弃一首其实能放的歌。这里在彻底失败前用 standard 再问一次。
+     *
+     * 只在 `level !== 'standard'` 且前面全失败时才多这一次请求。
+     */
+    if (level !== 'standard') {
+      const low = await this._eapi('/api/song/enhance/player/url/v1', {
+        ids: `[${id}]`, level: 'standard', encodeType, imme: 'true',
+      });
+      const rl = pick(low.ok && low.data && low.data.data && low.data.data[0], 'eapi-standard');
+      if (rl && rl.ok) {
+        this.log(`[netease] ${level} 档位拿不到地址，已降级 standard 播放（想固定用低档可在配置里改 netease.level）`);
+        return rl;
+      }
+    }
+
     return r3 || r || { ok: false, url: '', trial: false, trialEnd: null, br: 0, size: 0, fee: null, level: null, path: 'none', msg: '取地址失败' };
   }
 

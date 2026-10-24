@@ -169,9 +169,27 @@ class NeteaseBrowserFallback {
     if (!r || !r.ok) return { ok: false, msg: '页面取流失败：' + (r && r.error) };
     const d = r.json && r.json.data && r.json.data[0];
     if (!d || !d.url) {
+      /**
+       * **别再把"没有直链"一律说成"可能需要登录"**（2026-10-25）。
+       *
+       * 用户实测日志里出现 `code=200，可能需要登录`，而账号是有 VIP 的 ——
+       * netease 在 code=200 但没有 url 时有几种完全不同的原因，说法必须能区分，
+       * 否则用户会跑去重复登录（登了也没用）。按 `d.fee` / `d.code` 分流：
+       *   - `fee === 1`（VIP 专属）且我们这侧没登录 → 确实要登录/会员
+       *   - 其它情况 → 是"这个音质档位拿不到"，上层会降级到 standard 再试一次
+       */
+      const j = r.json || {};
+      const fee = d ? d.fee : undefined;
+      let why;
+      if (j.code && j.code !== 200) why = `code=${j.code}`;
+      else if (fee === 1) why = '该曲为 VIP 专属，当前会话拿不到完整直链';
+      else if (fee === 4) why = '该曲需要购买（付费数字专辑/单曲）';
+      else if (fee === 8) why = '该曲为免费低音质，请求的档位超出权限';
+      else why = '返回里没有直链（档位权限或版权原因）';
       return {
         ok: false,
-        msg: r.json ? `页面取流无地址（code=${r.json.code}${r.json.message ? ' ' + r.json.message : ''}，可能需要登录）` : '页面返回非 JSON：' + r.text,
+        msg: `页面取流无地址：${why}${j.message ? ' · ' + j.message : ''}（level=${level}）`,
+        noUrl: true, fee, level,
       };
     }
     return {
