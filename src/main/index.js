@@ -1174,8 +1174,14 @@ app.whenReady().then(async () => {
     {
       label: '叠加层',
       submenu: [
-        { label: '复制叠加层地址（给直播姬浏览器源）', click: () => clipboard.writeText(server.baseUrl + '/overlay') },
-        { label: '在浏览器中打开', click: () => shell.openExternal(server.baseUrl + '/overlay') },
+        // 三个地址各给一条 —— 直播姬里通常要的是「两个独立源」，
+        // 原来只有一条二合一（`/overlay`），复制出来填进去会把歌词和信息卡挤在一个框里。
+        { label: '复制歌词叠加层地址（浏览器源 1）', click: () => clipboard.writeText(server.baseUrl + '/overlay?only=lyrics') },
+        { label: '复制信息卡片地址（浏览器源 2）', click: () => clipboard.writeText(server.baseUrl + '/overlay?only=info') },
+        { label: '复制二合一地址（一个源里显示两样）', click: () => clipboard.writeText(server.baseUrl + '/overlay') },
+        { type: 'separator' },
+        { label: '在浏览器中打开歌词叠加层', click: () => shell.openExternal(server.baseUrl + '/overlay?only=lyrics') },
+        { label: '在浏览器中打开信息卡片', click: () => shell.openExternal(server.baseUrl + '/overlay?only=info') },
       ],
     },
   ]));
@@ -1201,6 +1207,15 @@ app.whenReady().then(async () => {
       tray.setContextMenu(Menu.buildFromTemplate([
         { label: '显示控制台', click: () => showControlWindow() },
         { label: '显示叠加层预览', click: () => presentOverlay('both') },
+        {
+          // 托盘里也给一份：直播姬的地址通常在「窗口找不到 / 被游戏盖住」时才想起来要抄
+          label: '复制叠加层地址',
+          submenu: [
+            { label: '歌词叠加层（浏览器源 1）', click: () => clipboard.writeText(server.baseUrl + '/overlay?only=lyrics') },
+            { label: '信息卡片（浏览器源 2）', click: () => clipboard.writeText(server.baseUrl + '/overlay?only=info') },
+            { label: '二合一（一个源里显示两样）', click: () => clipboard.writeText(server.baseUrl + '/overlay') },
+          ],
+        },
         { label: '运行日志 / 状态', click: () => showLogWindow() },
         { type: 'separator' },
         { label: '退出', role: 'quit' },
