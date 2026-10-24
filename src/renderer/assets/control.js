@@ -1009,28 +1009,23 @@
 
     const ul = $('lyricBanList');
     if (!ul) return;
-    const sig = list.map((e) => `${e.key}:${e.addedAt}`).join('|');
-    if (ul.dataset.sig === sig) return;
-    ul.dataset.sig = sig;
-    ul.innerHTML = '';
-    if (!list.length) {
-      ul.innerHTML = '<li><span class="tip">没有被禁的曲目。歌词配错时点底部歌词条上的「歌词配错 ✕」。</span></li>';
-      return;
-    }
-    list.forEach((e) => {
-      const li = document.createElement('li');
-      li.innerHTML = `<span class="nm" title="${escapeHtml(e.name || e.key)}">${escapeHtml(e.name || e.key)}</span>`
-        + `<span class="by">${escapeHtml(LYRIC_SRC_TXT[e.source] || e.source || '')}</span>`;
-      const b = document.createElement('button');
-      b.textContent = '恢复';
-      b.onclick = async () => {
-        const r = await api({ action: 'lyricAutoUnban', key: e.key });
-        const res = r.result || {};
-        toast(!!res.ok, res.ok ? `已恢复《${e.name || e.key}》的自动匹配歌词` : (res.msg || '恢复失败'));
-      };
-      li.appendChild(b);
-      ul.appendChild(li);
-    });
+    /* 用 lit patch 而不是整块重建（2026-10-25，段 2b）：
+       原来靠 `ul.dataset.sig` 比签名来省掉"没变也重建"的开销 —— lit 自己就是
+       最小 diff，这层签名缓存没必要了；而且重建会吞掉 mousedown/mouseup 之间的
+       节点（点「恢复」时手正按着）。`list` 每帧都会重画，签名缓存也就失去了意义。 */
+    if (!canLit()) return;                       // lit 还没到：这一帧不画，ready 后补
+    const { html, render, nothing } = window.__nekofmLit;
+    render(html`${!list.length
+      ? html`<li><span class="tip">没有被禁的曲目。歌词配错时点底部歌词条上的「歌词配错 ✕」。</span></li>`
+      : list.map((e) => html`<li>
+          <span class="nm" title=${e.name || e.key}>${e.name || e.key}</span>
+          <span class="by">${LYRIC_SRC_TXT[e.source] || e.source || ''}</span>
+          <button @click=${async () => {
+            const r = await api({ action: 'lyricAutoUnban', key: e.key });
+            const res = r.result || {};
+            toast(!!res.ok, res.ok ? `已恢复《${e.name || e.key}》的自动匹配歌词` : (res.msg || '恢复失败'));
+          }}>恢复</button>
+        </li>`)}`, ul);
   }
 
   on('btnLyricMismatch', 'click', async () => {
@@ -1201,6 +1196,8 @@
 
   /* 黑名单列表的 lit 迟到重画（paintBlacklist 在文件靠前定义，这里才能安全注册） */
   onLitReady(paintBlacklist);
+  /* 歌词禁令列表同理：首帧若早于 lit 加载，这里补画一次 */
+  onLitReady(() => { if (state) renderLyricBan(state.lyric, state.lyricBan); });
 
   /** 用 lit 把缓存列表 patch 到 DOM（不再整块 innerHTML 重建）。 */
   function paintCacheList() {
