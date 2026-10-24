@@ -43,17 +43,21 @@
     const isV2 = () => !!(window.__nekofmCtxMenu && window.__nekofmCtxMenu.isV2());
     const openCtx = (...a) => window.__nekofmCtxMenu.openCtx(...a);
 
-    function addItemActions(li, it, kind, onChanged) {
-      /** 收进这里的按钮不会进 DOM，只在右键菜单里出现 */
+    /** legacy 行内按钮工厂（v1 专用；v2 里它只作为"动作载体"存在，不进 DOM） */
+    function legacyBtn(text, title, fn, cls) {
+      const b = document.createElement('button');
+      b.textContent = text;
+      b.title = title;
+      if (cls) b.className = cls;
+      b.onclick = fn;
+      return b;
+    }
+
+    /** 一条曲目的全部动作（v1 行内 / v2 右键菜单共用同一份定义，不许两边漂移） */
+    function buildActs(it, kind, onChanged) {
+      /** 收进这里的按钮不会进 DOM（v2），只在右键菜单里出现 */
       const acts = [];
-      const mk = (text, title, fn, cls) => {
-        const b = document.createElement('button');
-        b.textContent = text;
-        b.title = title;
-        if (cls) b.className = cls;
-        b.onclick = fn;
-        return b;
-      };
+      const mk = legacyBtn;
 
       /* 「从这一首开始播整张歌单」——只在已保存列表出现（原来是 renderList 里直接
          appendChild 的，2026-10-24 统一收进 acts，否则菜单少一条、行内还多一个按钮）。 */
@@ -191,8 +195,17 @@
         danger: true,
         run: doRemove,
       });
-      /* 把收集到的按钮挂到右键菜单上。旧版面 `/` 不参与（见 isV2 的注释）。 */
+      /* 只造"动作"，不决定它们去哪儿 —— v1 塞进行内，v2 只喂右键菜单。
+         返回 sel/doRemove 是因为 v1 的行内路径还要用到下拉框和同一个删除 lambda。 */
+      return { acts, sel, doRemove };
+    }
+
+    /** 把一条曲目的动作挂到某个 li 上（v1 行内控件 / v2 右键菜单） */
+    function addItemActions(li, it, kind, onChanged) {
+      const { acts, sel, doRemove } = buildActs(it, kind, onChanged);
       if (isV2()) {
+        /* v2：行内一个控件都没有，全部走右键菜单（用户 2026-10-24 决定）。
+           这里给 li 挂的是"一次性"版本，paintListLit 会用自己的生命周期版覆盖。 */
         li.addEventListener('contextmenu', (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -205,12 +218,12 @@
         for (const a of acts) { if (a.btn) li.appendChild(a.btn); }
         li.appendChild(sel);
         // 旧版面保持原样：拉黑仍是「下拉 + 按钮」两个控件
-        li.appendChild(mk('拉黑', '按所选粒度加入黑名单', async () => {
+        li.appendChild(legacyBtn('拉黑', '按所选粒度加入黑名单', async () => {
           const r = await call({ action: 'blacklistSong', song: it.song, type: sel.value });
           if (r.result && r.result.ok) onChanged && onChanged();
           else toast(false, (r.result && r.result.msg) || '拉黑失败');
         }));
-        li.appendChild(mk('删除', kind === 'queue' ? '从当前播放列表移除' : (kind === 'history' ? '从已播放记录移除' : '从已保存列表移除'), doRemove, 'ghost'));
+        li.appendChild(legacyBtn('删除', kind === 'queue' ? '从当前播放列表移除' : (kind === 'history' ? '从已播放记录移除' : '从已保存列表移除'), doRemove, 'ghost'));
       }
       return li;
     }
@@ -218,8 +231,120 @@
     /** 渲染一个曲目列表（已播放 / 已保存共用） */
     function kindOf(ul) { return ul && ul.id === 'histList' ? 'history' : 'saved'; }
     function onChangedOf(ul) { return ul && ul.id === 'histList' ? refreshHistory : refreshSaved; }
+
+    /* ---- v2 的 lit 渲染路径（2026-10-25，段 2b） ----------------------------
+       为什么不把 v1 也一起换掉：v1（`/`）的行内控件是「按钮 + 拉黑下拉」，而 lit 渲染
+       出去的容器只认自己那份模板 —— 老代码用 appendChild 往里塞的外来节点会在下一次
+       重新渲染时被顶掉/重复。所以这里**有意分成两条路**：
+         · v2 → lit 模板（行内零控件，动作全在右键菜单里，见 addItemActions）
+         · v1 → 原样保留的 legacy DOM 拼装，一个字节不动（它是回滚保底面）
+       代价是行标记有两份；换来的是 v1 永远不会被这次改造碰到。
+       什么时候可以删掉 legacy 那份：等 v1 入口彻底下线（用户已同意"测完就隐藏"）。
+    ------------------------------------------------------------------------ */
+    function canLit() { return !!(window.__nekofmLit && window.__nekofmLit.render); }
+
+    /**
+     * 缓存角标算成一个纯数据，模板与 legacy 两条路共用同一套判定。
+     * 语义见 legacy 那边的大段注释：缺的那一半必须说清是哪一半。
+     */
+    function cacheBadgeOf(it) {
+      const c = it.cache;
+      if (!c) return null;
+      if (it.source === 'local' || (it.song && it.song.source === 'local')) return null;
+      const a = c.audio && c.audio.cached;
+      const l = c.lyrics && c.lyrics.cached;
+      if (a && l) return { cls: 'ok', text: '已缓存', title: `音频 ${c.audio.mb}MB + 歌词 ${c.lyrics.lines} 行，已能离线播放` };
+      if (a || l) {
+        return {
+          cls: 'half',
+          text: `半缓存（${a ? '无歌词' : '无音频'}）`,
+          title: a
+            ? `音频已缓存 ${c.audio.mb}MB，歌词没匹配到 —— 下次点「补缓存」会再检测一次`
+            : '歌词已缓存，音频还没下 —— 下次点「补缓存」会再试一次',
+        };
+      }
+      return { cls: 'none', text: '未缓存', title: '还没有缓存，播放时要联网取' };
+    }
+
+    /** li → 该行当前的数据与刷新回调（lit 复用节点，闭包里的 it 会过期，所以走这张表） */
+    const rowOf = new WeakMap();
+
+    function paintListLit(ul, items, emptyText) {
+      const { html, render, nothing } = window.__nekofmLit;
+      /* 首次接管某个容器时先把里面的东西清干净：lit 只管自己创建过的节点，遇到
+         "上一帧还是 legacy DOM 拼出来的行"时会**追加**而不是替换（实测出现同一行两份：
+         无空格那份来自 legacy，带缩进空格那份来自 lit）。清一次之后再用 __lit 记住。 */
+      if (!ul.__litOwned) { ul.textContent = ''; ul.__litOwned = true; }
+      const kind = kindOf(ul);
+      const onChanged = onChangedOf(ul);
+      const rows = items || [];
+      render(html`${rows.length === 0
+        ? html`<li><span class="tip">${emptyText}</span></li>`
+        : rows.map((it, i) => {
+            const badge = cacheBadgeOf(it);
+            const durSec = it.duration || (it.song && it.song.duration) || 0;
+            return html`<li>
+              <span class="idx">${i + 1}</span>
+              <span class="nm" title=${it.name || ''}>${it.name || '—'}</span>
+              ${badge
+                ? html`<span class="cache-badge ${badge.cls}" title=${badge.title}>${badge.text}</span>`
+                : html`<span class="cache-badge"></span>`}
+              <span class="by">${it.artistText || ''}</span>
+              <span class="by by-user">${it.uname || ''}</span>
+              <span class="dur">${durSec ? fmt(durSec) : ''}</span>
+              ${kind === 'history'
+                ? html`<button @click=${async () => {
+                    // 显式动作：直接点**这一首**（force 越过"刚放过"的去重），
+                    // 而不是拿歌名重新搜一遍 —— 搜索既慢又可能配错（2026-10 实测反馈）
+                    const r = await call({ action: 'order', song: it.song, force: true });
+                    const d = (r && r.result) || {};
+                    if (!d.ok) toast(false, d.msg || '无法播放这首');
+                    refreshHistory();
+                  }}>再来一次</button>`
+                : nothing}
+            </li>`;
+          })}`, ul);
+      /* 右键菜单：每个 li 只挂一次监听（lit 会复用节点）。
+         行数据挂在 **ul 上**（ul.__rows）而不是闭包里 —— 面模块如果被 init 两次，
+         闭包里的 Map 会和监听器分属两代，查不到行（实测就是"监听了但没有菜单"）。 */
+      ul.__rows = rows;
+      ul.__kind = kind;
+      ul.__onChanged = onChanged;
+      const lis = ul.children;
+      for (let i = 0; i < rows.length; i++) {
+        const li = lis[i];
+        if (!li) continue;
+        const it = rows[i];
+        it.__index = i + 1;
+        if (!it.song) continue;
+        li.dataset.i = String(i + 1);
+        if (!li.__ctxBound) {
+          li.__ctxBound = true;
+          li.addEventListener('contextmenu', (e) => {
+            const host = e.currentTarget.parentElement;
+            const idx = Number(e.currentTarget.dataset.i) - 1;
+            const rowIt = host && host.__rows ? host.__rows[idx] : null;
+            if (!rowIt) { console.warn('[library] 右键时找不到这一行的数据', idx); return; }
+            e.preventDefault();
+            e.stopPropagation();
+            const acts = buildActs(rowIt, host.__kind, host.__onChanged).acts;
+            const menu = [];
+            for (const a of acts) {
+              if (a === '-') { menu.push('-'); continue; }
+              menu.push(a.btn
+                ? { label: a.btn.textContent, title: a.btn.title, disabled: a.btn.disabled, run: () => a.btn.click() }
+                : a);
+            }
+            openCtx(e.clientX, e.clientY, `${rowIt.name || ''}${rowIt.artistText ? ` — ${rowIt.artistText}` : ''}`, menu);
+          });
+        }
+      }
+    }
+
     function renderList(ul, items, emptyText, extra) {
       if (!ul) return;
+      /* v2 走 lit patch；v1 保持原来的 DOM 拼装（见上面 paintListLit 上方那段注释）。 */
+      if (isV2() && canLit()) { paintListLit(ul, items, emptyText); return; }
       ul.innerHTML = '';
       if (!items || !items.length) {
         const li = document.createElement('li');
@@ -408,6 +533,14 @@
         else if (t === 'saved') refreshSaved();
       });
     })();
+
+    /* lit 迟到时的补救：面模块在**解析期**就被宿主 init 了（比 type=module 的 lit.js 早），
+       所以第一次 refresh* 很可能走的是 legacy DOM 路径 —— 那些行会带着行内控件，和 v2 的
+       「行内零控件」不一致。等 lit 到了重画一次即可（两个列表都只取一次数，代价可忽略）。 */
+    window.addEventListener('nekofm:lit-ready', () => {
+      if (!isV2()) return;
+      try { refreshHistory(); refreshSaved(); } catch (e) { console.error('[library] lit ready 重画失败', e); }
+    }, { once: true });
 
     return { refreshHistory: refreshHistory, refreshSaved: refreshSaved };
   };
