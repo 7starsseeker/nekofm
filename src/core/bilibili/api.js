@@ -280,7 +280,7 @@ class BiliApi {
     });
     if (!r.ok) return { ok: false, msg: r.msg };
     const d = r.data;
-    return { ok: true, roomId: d.room_id, liveStatus: d.live_status, title: d.title, uname: d.uname, online: d.online, cover: d.user_cover };
+    return { ok: true, roomId: d.room_id, uid: d.uid, liveStatus: d.live_status, title: d.title, uname: d.uname, online: d.online, cover: d.user_cover };
   }
 }
 

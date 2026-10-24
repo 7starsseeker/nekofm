@@ -431,6 +431,18 @@ class Engine extends EventEmitter {
          */
         this.roomLiveStatus = info.liveStatus == null ? null : info.liveStatus;
         this._startRoomWatch(info.roomId);
+        /**
+         * 记下主播身份（2026-10-25 补，用户报"日志里主播 uid=0 昵称=\"\"" 时发现）。
+         *
+         * 官方通道走的这条分支以前**从不写入** `anchorUid` / `anchorName`，
+         * 于是 `_isAnchorUser()` 永远返回 false —— 主播自己发的指令会被当普通观众，
+         * 队列里"只有本人/主播能切"也就永远不放行。
+         *
+         * 注意：官方通道的弹幕只给 `open_id`（不是 B站 uid），「uid 相等」这条判据
+         * 在这条通道上永远不成立，**真正能用的是昵称兜底**（所以必须把 uname 接进来）。
+         */
+        if (info.uid) this.anchorUid = info.uid;
+        if (info.anchorName) this.anchorName = info.anchorName;
         if (info.liveStatus != null && info.liveStatus !== 1) {
           const what = info.liveStatus === 2 ? '正在轮播' : '未开播';
           /**
@@ -651,6 +663,17 @@ class Engine extends EventEmitter {
     try { r = await this.bili.roomInfo(roomId); } catch { r = null; }
     if (token !== undefined && this._roomWatchToken !== token) return;
     if (!r || !r.ok || r.liveStatus == null) return;
+    /**
+     * 顺手把主播身份学下来（2026-10-25）。官方通道的 `anchor_info.uname` 偶尔为空，
+     * 而 `get_info` 一定会带 `uname` / `uid` —— 身份判据靠昵称兜底，昵称空着就等于
+     * 永远认不出主播（主播自己发的指令会被回"需要房主/主播权限"）。
+     * 只在**还没学到**时写，避免覆盖从长连学到的更权威的值。
+     */
+    if (!this.anchorName && r.uname) {
+      this.anchorName = r.uname;
+      this.log(`[engine] 主播昵称（来自房间信息）：${r.uname}`);
+    }
+    if (!this.anchorUid && r.uid) this.anchorUid = r.uid;
     // 变化判定与提示统一收在 _applyLiveStatus 里（轮询 / 长连推送共用一套）
     this._applyLiveStatus(r.liveStatus, 'poll', roomId);
   }
@@ -755,9 +778,17 @@ class Engine extends EventEmitter {
     if (this._danmakuSeen == null) this._danmakuSeen = 0;
     if (this._danmakuSeen < 3) {
       this._danmakuSeen++;
+      /**
+       * `本端 B站登录` 这一项要按通道说：官方通道**不给 B站 uid**（弹幕里是 open_id），
+       * 这里以前一律读 `this.danmaku.uid`，官方通道下它不存在 ⇒ 永远显示 0，
+       * 看起来像"没登录"，实际是这一行写错了对象。
+       */
+      const localIdTxt = (this.openLive && this.danmaku === this.openLive)
+        ? 'open_id 通道（官方平台不下发 B站 uid）'
+        : String((this.danmaku && this.danmaku.uid) || 0);
       this.log(`[engine] 弹幕身份样本 ${this._danmakuSeen}/3：uid=${d.uid} uname=${JSON.stringify(d.uname)}`
         + ` admin=${!!d.isAdmin} 认成主播=${isAnchor ? '是' : '否'}`
-        + ` | 本端 B站登录 uid=${(this.danmaku && this.danmaku.uid) || 0}`
+        + ` | 本端 B站登录 uid=${localIdTxt}`
         + ` 主播 uid=${this.anchorUid || 0} 昵称=${JSON.stringify(this.anchorName || '')}`);
     }
     /**

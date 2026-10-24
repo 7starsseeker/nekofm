@@ -58,6 +58,12 @@ const CMD = {
   ENTER: 'LIVE_OPEN_PLATFORM_LIVE_ROOM_ENTER',
   LIVE_START: 'LIVE_OPEN_PLATFORM_LIVE_START',
   LIVE_END: 'LIVE_OPEN_PLATFORM_LIVE_END',
+  /**
+   * 「互动玩法开始/结束」。B站会推，但我们没有对应的玩法，**明确登记为"已知但不处理"** ——
+   * 否则它会进 unknownCmds 里天天刷一条"收到未处理的 cmd"，把真正的异常信号埋掉。
+   */
+  INTERACTION_START: 'LIVE_OPEN_PLATFORM_INTERACTION_START',
+  INTERACTION_END: 'LIVE_OPEN_PLATFORM_INTERACTION_END',
 };
 
 /** 项目被关掉时 B站返回的码（7000=已关 7003=异常关闭/心跳超时），都要重新 start */
@@ -167,6 +173,12 @@ class OpenLiveClient extends EventEmitter {
     const anchor = data.anchor_info || {};
     this.roomId = anchor.room_id || null;
     this.anchorUid = anchor.uid || null;
+    /**
+     * 主播昵称（2026-10-25 补）。`anchor_info` 里就带 `uname`，以前没接 ——
+     * 而官方通道的弹幕只给 `open_id`（不是 B站 uid），「uid 相等」这条身份判据
+     * 在官方通道上永远不成立，**只能靠昵称兜底**。不接名字就等于永远认不出主播。
+     */
+    this.anchorName = anchor.uname || '';
     if (!this.authBody || !this.wssLink.length) throw new Error('start 响应缺少 auth_body / wss_link');
 
     /**
@@ -181,6 +193,7 @@ class OpenLiveClient extends EventEmitter {
 
     this.emit('room', {
       roomId: this.roomId, uid: this.anchorUid,
+      anchorName: this.anchorName,
       openId: anchor.open_id, gameId: this.gameId, liveStatus,
     });
     this.log(`[open-live] 项目已开启 game_id=${this.gameId} 房间=${this.roomId} live_status=${liveStatus}`);
@@ -341,6 +354,14 @@ class OpenLiveClient extends EventEmitter {
      */
     if (cmd === CMD.LIVE_START) { this.emit('liveStart', { roomId: this.roomId, raw: obj }); return; }
     if (cmd === CMD.LIVE_END) { this.emit('liveEnd', { roomId: this.roomId, raw: obj }); return; }
+    /**
+     * **已知但我们不处理的 cmd**：进了这张表就不再计入 `unknownCmds`。
+     * 目的是让「未知 cmd」这条日志只出现在**真的**协议变动时，不被日常消息淹掉。
+     */
+    if (cmd === CMD.ENTER || cmd === CMD.INTERACTION_START || cmd === CMD.INTERACTION_END) {
+      this.emit('raw', obj);
+      return;
+    }
     if (!this.stats.unknownCmds.includes(cmd)) {
       this.stats.unknownCmds.push(cmd);
       // 只记一次：真出现"改名"这一种情况时，这行就是证据
