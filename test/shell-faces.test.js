@@ -187,6 +187,37 @@ check('control.html 已挂上 shell.css 与 shell.js', () => {
   assert.ok(/src="\/assets\/ui\/shell\.js"/.test(html), 'control.html 没有引用 /assets/ui/shell.js');
 });
 
+/* ------------------------------------------------- 面模块接线（段 2 每搬一个面就加一条） */
+/*
+ * 为什么这条必须有：面模块是 `<script>` 顺序加载的普通全局脚本。少挂一个 `<script>`、
+ * 或者把它挂在 `control.js` 之后，页面**照样能打开**，只是那个面的按钮全都没反应
+ * —— 这正是"静默失败"，靠肉眼看不出来。所以：磁盘上有 face-*.js，就必须
+ * ①被 control.html 引用 ②在 /assets/control.js **之前** ③control.js 里真的调了它的 init。
+ */
+console.log('\n面模块接线：');
+
+const UI_DIR = path.join(ROOT, 'src/renderer/assets/ui');
+const faceFiles = fs.readdirSync(UI_DIR).filter((f) => /^face-[\w-]+\.js$/.test(f)).sort();
+const htmlSrc = read('src/renderer/control.html');
+const controlSrc = read('src/renderer/assets/control.js');
+const controlTagAt = htmlSrc.indexOf('src="/assets/control.js"');
+
+check('assets/ui/ 下至少有 1 个面模块', () => {
+  assert.ok(faceFiles.length >= 1, '一个 face-*.js 都没找到，段 2 的模块化等于没做');
+});
+
+for (const file of faceFiles) {
+  const key = file.replace(/^face-/, '').replace(/\.js$/, '');
+  check(`面模块 ${file}：已挂载、顺序正确、宿主真的调了它`, () => {
+    const tagAt = htmlSrc.indexOf(`src="/assets/ui/${file}"`);
+    assert.ok(tagAt >= 0, `control.html 没有引用 /assets/ui/${file}`);
+    assert.ok(controlTagAt >= 0, 'control.html 里找不到 /assets/control.js');
+    assert.ok(tagAt < controlTagAt, `${file} 挂在 control.js 之后了 —— 宿主启动时调 init 会拿到 undefined`);
+    const callable = new RegExp('__nekofmFaces\\s*&&[^\\n]*__nekofmFaces\\.' + key + '\\b|__nekofmFaces\\.' + key + '\\s*\\(');
+    assert.ok(callable.test(controlSrc), `control.js 里没找到调用 window.__nekofmFaces.${key}(...) 的地方`);
+  });
+}
+
 /* ------------------------------------------------------------------- 打一张地图 */
 
 console.log('\n当前归位（' + cards.length + ' 张卡）：');
