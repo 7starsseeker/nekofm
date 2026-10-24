@@ -2624,10 +2624,18 @@
         else if (a || l) badge = `<span class="cache-badge half" title="${a ? `音频已缓存 ${c.audio.mb}MB，歌词没匹配到 —— 下次点「补缓存」会再检测一次` : '歌词已缓存，音频还没下 —— 下次点「补缓存」会再试一次'}">半缓存（${a ? '无歌词' : '无音频'}）</span>`;
         else badge = '<span class="cache-badge none" title="还没有缓存，播放时要联网取">未缓存</span>';
       }
+      /* **列槽占位**（2026-10-24）：缓存角标 / 点歌人 / 时长这三个是可选字段，
+         原来缺了就整段不输出 —— 这行的后面所有列就都左移一格，纵向扫视时列立不住
+         （实测：同表内时长列在 x=677 与 708 之间跳）。成熟播放器的列表列宽固定，
+         空值也占位，所以这里一律输出 span，只让内容为空。 */
+      const durSec = it.duration || (it.song && it.song.duration) || 0;
       li.innerHTML = `<span class="idx">${i + 1}</span><span class="nm" title="${esc(it.name)}">${esc(it.name || '—')}</span>`
-        + badge
+        + (badge || '<span class="cache-badge"></span>')
         + `<span class="by">${esc(it.artistText || '')}</span>`
-        + (it.uname ? `<span class="by">${esc(it.uname)}</span>` : '');
+        + `<span class="by by-user">${esc(it.uname || '')}</span>`
+        /* 时长列：foobar2000 / MusicBee / AIMP 的列表都有，且**定宽右对齐** ——
+           不定宽就随歌名长短左右抖，扫一遍表全在动。本地曲目在 renderLocalList 里另有一套。 */
+        + `<span class="dur">${durSec ? fmt(durSec) : ''}</span>`;
       ul.appendChild(li);
       it.__index = i + 1;
       if (extra) extra(li, it);

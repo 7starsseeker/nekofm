@@ -124,9 +124,76 @@ html[data-v2="1"] #lyricStrip { grid-row: 4; }
    结果歌名被压到 0px（宽度为 0，根本看不见），按钮里的字自己折成两行（行高 42px）。
    给歌名一个真实的下限（12em 基准），其余元素就换到第二行去，各字都不再断。 */
 html[data-v2] .v2face li { flex-wrap: wrap; }
-html[data-v2] .v2face li .nm { flex: 1 1 12em; min-width: 8em; }
+/* 歌名列**定宽**——不是弹性列。实测：歌名 flex:1 会吸收全部余量，于是后面
+   的「已缓存 / 歌手 / 点歌人 / 时长」在每一行都落在不同 x 上（截图逐行量过：
+   徽标 525 / 540 / 624），纵向扫视时整张表在晃。成熟播放器的名字列都是定宽 +
+   超长截断（悬停看全文），列才立得住。22em ≈ 286px，配合右侧各定宽列刚好一行。 */
+html[data-v2] .v2face li .nm {
+  /* 歌名是**唯一弹性列** —— 这是 8 个成熟列表的共识：没有一家让两列同吃剩余宽度
+     （foobar 的 Title、Columns UI 的 Album、MusicBee 的 Title+Album、Quod Libet 的
+     Title、点歌机 Songify 的 Artist+Title）。其余列全部定宽，于是每行的歌名宽度
+     都相同、后面各列自然对齐。240px 是下限：再窄就装不下中等长度歌名。 */
+  /* flex-basis 必须是 **0**，不能是 auto：basis auto 时行宽取决于该行歌名自身长度，
+     长歌名会把后面的列整体推右、把「删除」挤到第二行（截图第 9 行就是这么坏的）。
+     basis 0 + tabular 定宽兄弟列 ⇒ 每行拿到完全相同的歌名宽度，列才真的对齐。 */
+  flex: 1 1 0;
+  min-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 html[data-v2] .v2face li > button,
 html[data-v2] .v2face li > select { white-space: nowrap; }
+
+/* ---------------------------------------------------------------------------
+   列表行的列宽纪律（照着成熟播放器的列表抄，不是自创）
+   ---------------------------------------------------------------------------
+   foobar2000 / MusicBee / AIMP 的 playlist 都是这个骨架：
+     序号 | 歌名（**唯一弹性列**） | 次要列（歌手/专辑，超长截断） | 时长（定宽右对齐） | 行内操作
+   要点是**只有歌名可以被压缩**，其余列要么定宽、要么有上限：
+     · 序号用 tabular-nums 定宽 —— 不定宽的话 9 → 10 会左右抖一行；
+     · 歌手/点歌人给上限 + 省略号 —— 否则一个长歌手名会把歌名挤掉（用户实测踩到）；
+     · 时长定宽右对齐 —— 不定宽就随歌名长短左右跳，扫视时整张表都在动；
+     · 行内操作推到最右边成一整块 —— 换行时整块掉到第二行，而不是逐个散开。
+   区间选择器限定在 `html[data-v2]` + `.v2face` 内：旧版面 `/` 一个字节都不动。
+   --------------------------------------------------------------------------- */
+html[data-v2] .v2face li .idx {
+  flex: none;
+  min-width: 2.2em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+html[data-v2] .v2face li .by {
+  flex: none;
+  width: 9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 点歌人是"谁点的"，比歌手次要：再收窄一档 */
+html[data-v2] .v2face li .by-user { width: 4.5em; opacity: .8; }
+/* 缓存角标也是定宽列槽：没有缓存的曲目（或本地曲目）那一格留空但**占位** */
+html[data-v2] .v2face li .cache-badge {
+  flex: none;
+  width: 3.8em;
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+html[data-v2] .v2face li .dur {
+  flex: none;
+  width: 4.2em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  font-size: 12px;
+}
+/* 第一个按钮把整块操作推右：装得下时"左边信息 / 右边操作"，
+   装不下时这一整块掉到第二行右侧，仍是齐的一行 */
+html[data-v2] .v2face li > button:first-of-type,
+html[data-v2] .v2face li > select:first-of-type { margin-left: auto; }
+/* 扫长列表时鼠标所在行要能跟住（AIMP/MusicBee 都高亮当前行） */
+html[data-v2] .v2face li:hover { background: rgba(126, 231, 255, .06); }
 
 /* 曲库面：把队列栏让给列表。
    实测（1200 窗口）一条「已保存播放列表」行有 11 个行内元素，一行要 ~780px 才不折；
