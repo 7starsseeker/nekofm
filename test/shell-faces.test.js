@@ -238,6 +238,39 @@ check('lit-html：vendor 文件在位、加载器与宿主接线齐全', () => {
   assert.ok(controlSrc.includes('nekofm:lit-ready'), 'control.js 没有监听 nekofm:lit-ready（列表会一直空着）');
 });
 
+/* ------------------------------------------------------------ 顶层调用不能撞 TDZ
+ *
+ * control.js 是一个大 IIFE，里面用 `const` / `function` 声明的东西有**严格的先后**。
+ * 2026-10-25 真实踩到：`onLitReady(paintBlacklist)` 被写在 `const litReadyHooks`
+ * 之前 ⇒ 抛 `ReferenceError: Cannot access 'litReadyHooks' before initialization`，
+ * 而那是 IIFE#1 的顶层语句 ⇒ **整个 IIFE#1 挂掉**：旧版面 21 张卡全堆在 main 里、
+ * 5 个页签点了没反应，而 smoke 和 12 个测试文件全绿（它们都不打开 `/`）。
+ * 这类静默失败必须在静态检查里挡掉。 */
+check('control.js：onLitReady(...) 的调用点必须在 litReadyHooks 声明之后', () => {
+  // 先把注释剥掉再扫：否则注释里那句「见那边的 onLitReady(paintBlacklist)」会被当成调用点。
+  // 只剥块注释与整行的 // 注释 —— 行尾注释里的代码片段不值得为它写个词法器。
+  const clean = controlSrc
+    .replace(/\/\*[\s\S]*?\*\//g, (s) => s.replace(/[^\n]/g, ' '))
+    .replace(/^[ \t]*\/\/.*$/gm, (s) => s.replace(/[^\n]/g, ' '));
+  const declAt = clean.indexOf('const litReadyHooks');
+  assert.ok(declAt >= 0, 'control.js 里找不到 const litReadyHooks 声明');
+  const re = /onLitReady\s*\(/g;
+  let m;
+  let checked = 0;
+  while ((m = re.exec(clean))) {
+    // 跳过函数自身的声明 `function onLitReady(fn)`
+    const before = clean.slice(Math.max(0, m.index - 20), m.index);
+    if (/function\s+$/.test(before)) continue;
+    checked += 1;
+    assert.ok(
+      m.index > declAt,
+      'control.js 第 ' + (clean.slice(0, m.index).split('\n').length) + ' 行的 onLitReady(...) '
+        + '在 const litReadyHooks 声明之前 —— 会抛 ReferenceError 并让整个 IIFE#1 挂掉'
+    );
+  }
+  assert.ok(checked >= 1, '没找到任何 onLitReady(...) 调用点，这条断言形同虚设');
+});
+
 /* ------------------------------------------------------------------- 打一张地图 */
 
 console.log('\n当前归位（' + cards.length + ' 张卡）：');

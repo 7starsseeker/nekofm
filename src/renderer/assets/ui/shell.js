@@ -20,41 +20,37 @@
 (function () {
   'use strict';
 
-  /* -------------------------------------------------- 旧版面（`/`）的唯一一件事
-     如果用户是**从新版点「旧版界面」过来的**，就在右下角挂一个「回新版界面」
-     的小 chip —— 否则他点进去就再也找不到回来的路（2026-10-25 真实踩过：
-     旧版面没有任何指向 `/console` 的入口，只能重启程序）。
+  /* -------------------------------------------------- 旧版面（`/`）：挂一个「新界面」入口
+     为什么无条件挂（2026-10-25 用户要求）：实际交付物是打包好的 EXE，用户没法在
+     程序里敲地址栏、也改不了加载哪个页面 —— 旧版面里没有任何指向 `/console` 的
+     入口的话，他点进去就只能重启程序（真实踩过）。所以这里**不再看 sessionStorage**，
+     任何进到旧版面的人都能一键回新版。
 
-     为什么用 sessionStorage 判据而不是无条件挂：旧版面要"一个字节不动"，
-     正常打开 `/` 的人不应该看到任何新东西。只有走过逃生门的人才看得到。 */
+     位置：**放进播放器栏右侧那一簇按钮里**（收藏/歌词/音量左边）—— 用户要求"放在
+     播放器面板附近"。第一版用 fixed 浮层定位，会盖住「播放核心 / 输出设备」卡里的
+     「打开窗口」按钮；in-flow 放进栏里就不会压住任何东西。 */
   if (location.pathname !== '/console') {
-    (function addBackToV2Chip() {
-      var came = null;
-      try { came = sessionStorage.getItem('nekofm:cameFromV2'); } catch (e) { /* 隐身模式忽略 */ }
-      if (came !== '1') return;
-      // control.js 还要建卡片，等版面稳定了再挂
-      window.addEventListener('load', function () {
-        var a = document.createElement('a');
-        a.href = '/console';
-        a.textContent = '← 回新版界面';
-        a.title = '回到新版五面布局（数据与功能完全相同）';
-        // 内联样式：旧版面不加载 shell.css（它的规则全挂在 html[data-v2] 下）
-        // bottom 要让开底部那两条常驻条（播放器栏 100 + 歌词条 74），否则会盖住
-        // 歌词条右侧的「歌词纠错 / 收起」按钮（第一版就盖住了）。
-        a.style.cssText = [
-          'position:fixed', 'right:18px', 'bottom:186px', 'z-index:9998',
-          'padding:7px 12px', 'border-radius:9px',
-          'background:rgba(23,32,48,.94)', 'border:1px solid #35506b',
-          'color:#7ee7ff', 'font-size:12px', 'line-height:1',
-          'text-decoration:none', 'box-shadow:0 8px 24px rgba(0,0,0,.45)',
-          'cursor:pointer',
-        ].join(';');
-        a.addEventListener('click', function () {
-          try { sessionStorage.removeItem('nekofm:cameFromV2'); } catch (e) { /* ignore */ }
-        });
-        document.body.appendChild(a);
-      }, { once: true });
-    })();
+    // control.js 还要建卡片，等版面稳定了再挂
+    window.addEventListener('load', function () {
+      var right = document.getElementById('pbRight');
+      if (!right) {
+        if (window.console) console.warn('[shell] 没找到 #pbRight —— 旧版面缺「新界面」入口');
+        return;
+      }
+      var a = document.createElement('a');
+      a.href = '/console';
+      a.textContent = '新界面 →';
+      a.title = '回到新版五面布局（数据与功能完全相同）';
+      a.id = 'backToV2';
+      // 内联样式：旧版面不加载 shell.css（它的规则全挂在 html[data-v2] 下）
+      a.style.cssText = [
+        'margin-right:6px', 'padding:5px 9px', 'border-radius:7px',
+        'border:1px dashed #35506b', 'color:#7ee7ff',
+        'font-size:12px', 'line-height:1', 'text-decoration:none',
+        'white-space:nowrap', 'cursor:pointer',
+      ].join(';');
+      right.insertBefore(a, right.firstChild);
+    }, { once: true });
     return;
   }
 
@@ -248,6 +244,37 @@
       faceEls.settings.appendChild(help);
     }
 
+    /* -------------------------------------------------- 5.5) 「界面」卡（只在新版存在）
+      为什么在 JS 里建而不写进 control.html：这张卡里的开关只对**新版**有意义
+       （它控制的是新版左侧导航底部的「旧版界面」入口）。写进 control.html 的话，
+       旧版面也会看到它，而那边 shell.js 直接 return、开关根本没人绑 —— 一个点了
+       没反应的死控件，还会把旧版面的「其余功能」页多撑出一张卡（实测 +127px）。 */
+    (function buildUiCard() {
+      var card = document.createElement('div');
+      card.className = 'card';
+      card.id = 'uiCard';
+      var h = document.createElement('h2');
+      h.textContent = '界面';
+      card.appendChild(h);
+      var row = document.createElement('div');
+      row.className = 'row';
+      var label = document.createElement('label');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.id = 'showLegacyEntry';
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' 显示「旧版界面」入口'));
+      row.appendChild(label);
+      card.appendChild(row);
+      var tip = document.createElement('div');
+      tip.className = 'tip';
+      tip.textContent = '新版用顺手之后可以把左侧导航底部的「旧版界面」关掉，界面更干净。'
+        + '关掉不会把自己关死：旧版面里始终有「新界面 →」按钮，程序默认打开的也是新版。'
+        + '这个开关只记在本机（localStorage），不进配置文件。';
+      card.appendChild(tip);
+      faceEls.settings.appendChild(card);
+    })();
+
     /* -------------------------------------------------- 6) 导航按钮 */
     FACES.forEach(function (f) {
       if (f.pinned) {
@@ -268,18 +295,28 @@
     });
 
     /* 逃生门：旧版面就在 `/`，随时可以点回去看（不需要改代码、不需要重启）。
-       注意它**是双向的**：点过去之前先把「我是从新版来的」记在 sessionStorage，
-       旧版面那边才有依据挂一个「回新版界面」的入口 —— 否则用户点进去就再也
-       找不到回来的路（2026-10-25 实际踩过）。 */
+       它**是双向的**：旧版面那边无条件挂「新界面 →」入口（打包好的 EXE 里用户
+       没法敲地址栏，所以不能只靠 URL 区分）。
+
+       入口本身可以被藏起来 —— 设置面「界面」卡的复选框（2026-10-25 用户要求：
+       新版用顺手后就不需要这个入口）。藏的是**入口**不是退路：`NEKOFM_CONTROL_PAGE=/`
+       仍能把程序开到旧版面。 */
+    var LEGACY_KEY = 'nekofm:legacyEntry';
+    function legacyEntryVisible() {
+      try { return localStorage.getItem(LEGACY_KEY) !== 'hide'; } catch (e) { return true; }
+    }
     var back = document.createElement('a');
     back.href = '/';
     back.textContent = '旧版界面';
     back.title = '回到改造前的单列分页版面（数据与功能完全相同）';
     back.className = 'v2-nav-back';
-    back.addEventListener('click', function () {
-      try { sessionStorage.setItem('nekofm:cameFromV2', '1'); } catch (e) { /* 隐身模式忽略 */ }
-    });
     nav.appendChild(back);
+
+    back.hidden = !legacyEntryVisible();
+    /* 「界面」卡里的复选框要等整棵 v2wrap **接进文档**之后才能按 id 找到 ——
+       卡片在 build() 早期就被搬进 .v2face，但那时 v2wrap 还是游离节点，
+       document.getElementById 找不到它（2026-10-25 实测：绑定失败且没有任何报错，
+       表现为"勾选框点了没反应、也不持久"）。所以真正的绑定放在第 7 步之后。 */
 
     /* -------------------------------------------------- 7) 装进文档 */
     wrap.appendChild(nav);
@@ -287,6 +324,24 @@
     wrap.appendChild(rail);
     document.body.appendChild(wrap);
     document.documentElement.dataset.v2 = '1';
+
+    /* 7.5) 现在才绑「界面」卡的复选框（它此时才真的在文档里，见上面的注释）。
+       勾选状态与入口显隐实时同步；键只存本机 localStorage，不进配置文件。 */
+    (function bindLegacyCheckbox() {
+      var cb = document.getElementById('showLegacyEntry');
+      if (!cb) {
+        if (window.console) console.warn('[shell] 没找到 #showLegacyEntry —— 「旧版界面」入口的开关会失效');
+        return;
+      }
+      cb.checked = legacyEntryVisible();
+      cb.addEventListener('change', function () {
+        try {
+          if (cb.checked) localStorage.removeItem(LEGACY_KEY);
+          else localStorage.setItem(LEGACY_KEY, 'hide');
+        } catch (e) { /* 隐身模式忽略：本次会话仍然生效 */ }
+        back.hidden = !cb.checked;
+      });
+    })();
 
     /* -------------------------------------------------- 8) 切面 */
     function show(key) {

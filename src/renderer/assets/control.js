@@ -902,28 +902,47 @@
     if (document.activeElement !== cb) cb.checked = !!bl.enabled;
     $('blCount').textContent = `共 ${bl.total} 条规则${bl.enabled ? '' : '（已停用）'}`;
     const ul = $('blList');
-    const sig = `${bl.enabled}|${bl.total}|` + (bl.rules || []).map((r) => `${r.id}:${r.type}:${r.value}`).join('|');
-    // 正在这一列里操作（下拉展开等）时一律不重画 —— 原生控件被重建会自己收起
-    const busy = ul.contains(document.activeElement) && document.activeElement.tagName === 'SELECT';
-    if (busy || ul.dataset.sig === sig) return;
-    ul.dataset.sig = sig;
-    ul.innerHTML = '';
-    if (!bl.rules || !bl.rules.length) {
-      ul.innerHTML = '<li><span class="tip">暂无规则。可添加关键词/歌手/歌曲ID/BV号。</span></li>';
-      return;
-    }
-    bl.rules.forEach((r) => {
-      const li = document.createElement('li');
-      li.innerHTML = `<span class="tip">${RULE_LABEL[r.type] || r.type}</span>`
-        + `<span class="nm">${escapeHtml(r.value)}</span>`
-        + (r.note ? `<span class="by">${escapeHtml(String(r.note).slice(0, 16))}</span>` : '');
-      const b = document.createElement('button');
-      b.textContent = '删';
-      b.onclick = () => api({ action: 'blacklistRemove', id: r.id });
-      li.appendChild(b);
-      ul.appendChild(li);
-    });
+    if (!ul) return;
+    lastBlacklist = bl;
+    paintBlacklist();
   }
+  /** 最近一次的黑名单状态：lit 就绪后要重画一次（首帧拿不到模板引擎）。 */
+  let lastBlacklist = null;
+  /**
+   * 黑名单列表 —— lit 版。
+   *
+   * 2026-10-25 换 lit 时顺手删掉两处 hack：
+   *   · `ul.dataset.sig` 签名比较 —— 那是为了省掉"没变也重建"的开销；
+   *   · `busy`（`ul.contains(document.activeElement) && tagName === 'SELECT'`）——
+   *     那是为了防"重建把展开的下拉收起"。现在行内早没有 select 了，这条守卫
+   *     一直是死的；而 lit 是 patch 不是重建，焦点与滚动位置本来就不会丢。
+   * 另外 `escapeHtml` 也免了：lit 对 `${}` 插值自动转义（按文本节点/属性拼接，
+   * 不会再走一遍字符串拼接），少一个"忘了 escape"的机会。
+   */
+  function paintBlacklist() {
+    const bl = lastBlacklist;
+    const ul = $('blList');
+    if (!bl || !ul || !canLit()) return;
+    const { html, render, nothing } = window.__nekofmLit;
+    const rules = bl.rules || [];
+    render(html`
+      ${rules.length === 0
+        ? html`<li><span class="tip">暂无规则。可添加关键词/歌手/歌曲ID/BV号。</span></li>`
+        : rules.map((r) => html`
+            <li>
+              <span class="tip">${RULE_LABEL[r.type] || r.type}</span>
+              <span class="nm">${r.value}</span>
+              ${r.note ? html`<span class="by">${String(r.note).slice(0, 16)}</span>` : nothing}
+              <button @click=${() => api({ action: 'blacklistRemove', id: r.id })}>删</button>
+            </li>`)}
+    `, ul);
+  }
+  /* 注意：这里**不能**写 onLitReady(paintBlacklist) —— onLitReady/litReadyHooks
+     定义在本文件靠后（在线缓存那一节），在这里调用会撞 TDZ
+     （`ReferenceError: Cannot access 'litReadyHooks' before initialization`），
+     而它是 IIFE#1 的顶层语句 ⇒ 整个 IIFE#1 挂掉、旧版面的 pageShell 都不再执行
+     （2026-10-25 实测：旧版面 21 张卡全堆在 main 里、5 个页签点了没反应）。
+     lit 迟到的重画注册放在 onLitReady 定义之后，见那边的 `onLitReady(paintBlacklist)`。 */
 
   on('blEnabled', 'change', () => api({ action: 'blacklistToggle', enabled: $('blEnabled').checked }));
   on('btnBlAdd', 'click', async () => {
@@ -1179,6 +1198,9 @@
 
   /** 最近一次取到的缓存数据，供 lit 就绪后重画。 */
   let lastCacheView = null;
+
+  /* 黑名单列表的 lit 迟到重画（paintBlacklist 在文件靠前定义，这里才能安全注册） */
+  onLitReady(paintBlacklist);
 
   /** 用 lit 把缓存列表 patch 到 DOM（不再整块 innerHTML 重建）。 */
   function paintCacheList() {
