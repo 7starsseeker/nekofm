@@ -1150,12 +1150,75 @@
    */
   const CACHE_RENDER_MAX = 300;
 
+  /* ─────────────────────── lit-html 闸门（试点：在线缓存列表） ───────────────────────
+   *
+   * 为什么需要闸门：`assets/vendor/lit-html.js` 是纯 ESM，只能以
+   * `<script type="module">` 加载，而 module 一律 defer ⇒ 它执行在所有 classic
+   * 脚本**之后**。control.js 在解析期就跑第一帧，那时 window.__nekofmLit 一定
+   * 还不存在。
+   *
+   * 所以渲染侧统一先问 canLit()：拿不到就**什么都不画**，再由 nekofm:lit-ready
+   * 事件重画一次。**刻意不写「退回字符串拼接」的备用实现** —— 同一个列表有两套
+   * 实现就是同一个事实两个副本，改一处漏一处。
+   */
+  function canLit() { return !!(window.__nekofmLit && window.__nekofmLit.render); }
+  const litReadyHooks = [];
+  window.addEventListener('nekofm:lit-ready', () => {
+    while (litReadyHooks.length) {
+      const fn = litReadyHooks.shift();
+      try { fn(); } catch (e) { console.error('[lit] ready 回调失败', e); }
+    }
+  }, { once: true });
+  function onLitReady(fn) { if (canLit()) fn(); else litReadyHooks.push(fn); }
+  // lit 一直没来 → 列表会空着，这是**静默**失败，必须自己喊出来。
+  setTimeout(() => {
+    if (!canLit()) {
+      log('error', 'lit-html 没加载 —— 在线缓存列表会空着。检查 /assets/ui/lit.js 与 CSP（script-src 只允许 self）');
+    }
+  }, 3000);
+
+  /** 最近一次取到的缓存数据，供 lit 就绪后重画。 */
+  let lastCacheView = null;
+
+  /** 用 lit 把缓存列表 patch 到 DOM（不再整块 innerHTML 重建）。 */
+  function paintCacheList() {
+    const view = lastCacheView;
+    if (!view) return;
+    const ul = $('cacheList');
+    if (!ul || !canLit()) return;
+    const { html, render, nothing } = window.__nekofmLit;
+    render(html`
+      ${view.shown.map((m) => html`
+        <li>
+          <span class="nm">${m.name || m.key}</span>
+          <span class="by">${m.artist || ''}</span>
+          <span class="by">${m.mb} MB</span>
+          <button title="删除这一条缓存（音频 + 对应歌词）"
+                  @click=${() => dropCacheKey(m.key)}>删</button>
+        </li>`)}
+      ${view.all.length === 0 ? html`<li><span class="tip">还没有缓存条目</span></li>` : nothing}
+      ${view.more > 0 ? html`<li><button @click=${() => refreshCacheList(true)}>显示全部（还有 ${view.more} 条）</button></li>` : nothing}
+    `, ul);
+  }
+  onLitReady(paintCacheList);
+
+  /** 删一条缓存。挂在模板里的 @click 上（lit 会用同一个函数引用，不重复绑）。 */
+  async function dropCacheKey(key) {
+    const rr = await api({ action: 'cacheDropKeys', keys: [key] });
+    const d = (rr && rr.result) || {};
+    const ok = !!(d.audio || d.lyrics);
+    log(ok ? 'ok' : 'error', ok ? `已删除（音频 ${d.audio} · 歌词 ${d.lyrics}）` : '删除失败');
+    refreshCacheList(lastCacheView ? lastCacheView.showAll : false);
+  }
+
   /**
    * 刷新缓存列表。
    *
    * 2026-09-26 修：旧实现取 `stats().recent`（服务端只截 10 条）再 `slice(0, 12)`，
    * 两处上限叠起来 —— 55 条缓存只显示 10 条，用户反馈"显示的项目不全"。
    * 现在摘要走 `cacheStats`、明细走 `cacheList`（全量）。
+   *
+   * 2026-10-25：渲染改走 lit（`paintCacheList`），本函数只负责取数与摘要文字。
    *
    * @param {boolean} showAll 是否铺开全部行（点「显示全部」后为 true）
    */
@@ -1167,49 +1230,16 @@
 
     const lr = await api({ action: 'cacheList' });
     const all = (lr.result && lr.result.items) || [];
-    const ul = $('cacheList');
-    ul.innerHTML = '';
     const shown = all.slice(0, showAll ? all.length : CACHE_RENDER_MAX);
+    lastCacheView = { showAll, all, shown, more: all.length - shown.length };
+    paintCacheList();
 
-    shown.forEach((m) => {
-      const li = document.createElement('li');
-      li.innerHTML = `<span class="nm">${escapeHtml(m.name || m.key)}</span>`
-        + `<span class="by">${escapeHtml(m.artist || '')}</span>`
-        + `<span class="by">${m.mb} MB</span>`;
-      const del = document.createElement('button');
-      del.textContent = '删';
-      del.title = '删除这一条缓存（音频 + 对应歌词）';
-      del.onclick = async () => {
-        const rr = await api({ action: 'cacheDropKeys', keys: [m.key] });
-        const d = (rr && rr.result) || {};
-        log(d.audio || d.lyrics ? 'info' : 'error',
-          d.audio || d.lyrics ? `已删除（音频 ${d.audio} · 歌词 ${d.lyrics}）` : '删除失败');
-        refreshCacheList(showAll);
-      };
-      li.appendChild(del);
-      ul.appendChild(li);
-    });
-
-    if (!all.length) {
-      const li = document.createElement('li');
-      li.innerHTML = '<span class="tip">还没有缓存条目</span>';
-      ul.appendChild(li);
-    }
     const info = $('cacheListInfo');
     if (info) {
       info.textContent = all.length
         ? `缓存了 ${all.length} 条（按缓存时间倒序）`
           + (shown.length < all.length ? `，下面先列最近 ${shown.length} 条` : '')
         : '';
-    }
-    // 条数很多时给一个手动铺开的入口
-    if (shown.length < all.length) {
-      const li = document.createElement('li');
-      const more = document.createElement('button');
-      more.textContent = `显示全部（还有 ${all.length - shown.length} 条）`;
-      more.onclick = () => refreshCacheList(true);
-      li.appendChild(more);
-      ul.appendChild(li);
     }
   }
 

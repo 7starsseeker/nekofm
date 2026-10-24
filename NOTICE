@@ -22,8 +22,18 @@ their own licenses.
     embedded in Electron is licensed under LGPL/GPL depending on the build.
     Full texts: see "LICENSES.chromium.html" in the release archive.
 
-The source repository itself declares no runtime third-party dependency:
-NekoFM runs on Node.js built-ins plus Electron.
+  lit-html 3.3.3
+    License: BSD 3-Clause
+    https://github.com/lit/lit
+    Vendored verbatim as "src/renderer/assets/vendor/lit-html.js" (unmodified,
+    original license header kept; full text in "lit-html.LICENSE" beside it).
+    Loaded as an ES module from the same origin, because the app's CSP forbids
+    CDN scripts. Used only by the control console's renderer, for patching
+    list DOM instead of rebuilding it.
+
+Apart from the vendored lit-html above, the source repository declares no
+runtime third-party dependency: the main process runs on Node.js built-ins
+plus Electron.
 
 --------------------------------------------------------------------------
 Content and accounts

@@ -927,5 +927,10 @@
 <script src="/assets/control.js"></script>
 <!-- 新版外壳：必须排在 control.js 之后（要等它把卡片搬进页签后再重新分堆） -->
 <script src="/assets/ui/shell.js"></script>
+<!-- lit-html 加载器：ESM，必须用 type="module"（vendor 里那份是纯 ESM）。
+     module 一律 defer ⇒ 它一定在所有 classic 脚本之后执行，所以渲染侧不能
+     假设 window.__nekofmLit 已存在：拿不到就跳过这一帧，等 nekofm:lit-ready
+     事件再重画（见 assets/ui/lit.js 文件头）。 -->
+<script type="module" src="/assets/ui/lit.js"></script>
 </body>
 </html>

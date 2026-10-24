@@ -218,6 +218,26 @@ for (const file of faceFiles) {
   });
 }
 
+/* ------------------------------------------------------------------- lit 接线 */
+
+/* vendor 里那份 lit-html 是纯 ESM，只能用 <script type="module"> 加载。
+ * 少了 type="module" 的话浏览器会按 classic 解析、直接 SyntaxError，而渲染侧
+ * 的 canLit() 闸门只会「这一帧不画」——表现就是在线缓存列表空着、控制台一条
+ * 报错都没有。这种静默失败必须在测试里挡掉。 */
+check('lit-html：vendor 文件在位、加载器与宿主接线齐全', () => {
+  const vendorPath = path.join(ROOT, 'src/renderer/assets/vendor/lit-html.js');
+  assert.ok(fs.existsSync(vendorPath), 'src/renderer/assets/vendor/lit-html.js 不存在');
+  assert.ok(fs.statSync(vendorPath).size > 5000, 'vendored lit-html.js 体积异常（应约 7.3KB）');
+  const loader = read('src/renderer/assets/ui/lit.js');
+  assert.ok(/from\s+'\/assets\/vendor\/lit-html\.js'/.test(loader), 'lit.js 没有从 /assets/vendor/lit-html.js 导入');
+  assert.ok(/__nekofmLit\s*=/.test(loader), 'lit.js 没有把句柄挂到 window.__nekofmLit');
+  assert.ok(/nekofm:lit-ready/.test(loader), 'lit.js 没有派发 nekofm:lit-ready');
+  const modTag = htmlSrc.match(/<script type="module" src="\/assets\/ui\/lit\.js"><\/script>/);
+  assert.ok(modTag, 'control.html 里的 lit.js 必须是 <script type="module">（classic 解析会 SyntaxError）');
+  assert.ok(controlSrc.includes('function canLit()'), 'control.js 里没有 canLit() 闸门');
+  assert.ok(controlSrc.includes('nekofm:lit-ready'), 'control.js 没有监听 nekofm:lit-ready（列表会一直空着）');
+});
+
 /* ------------------------------------------------------------------- 打一张地图 */
 
 console.log('\n当前归位（' + cards.length + ' 张卡）：');
