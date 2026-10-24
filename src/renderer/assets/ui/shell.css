@@ -267,3 +267,50 @@ html[data-v2] .v2face #localList { max-height: 340px; overflow: auto; }
   }
   .v2face.active { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ---------------------------------------------------------------------------
+   行的操作菜单（右键）—— 2026-10-24：行内不再常驻按钮，全部收进这里
+   --------------------------------------------------------------------------- */
+#v2ctx {
+  position: fixed;
+  z-index: 9999;
+  min-width: 176px;
+  max-width: 320px;
+  padding: 5px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, .5);
+  font-size: 13px;
+  color: var(--text);
+}
+#v2ctx[hidden] { display: none; }
+#v2ctx .hd {
+  padding: 5px 9px 6px;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.35;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#v2ctx .it {
+  display: block;
+  width: 100%;
+  padding: 7px 9px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+#v2ctx .it:hover { background: rgba(126, 231, 255, .13); }
+#v2ctx .it.danger { color: var(--err); }
+#v2ctx .it.danger:hover { background: rgba(248, 113, 113, .14); }
+#v2ctx .it.off { color: var(--dim); cursor: default; }
+#v2ctx .it.off:hover { background: none; }
+#v2ctx .sep { height: 1px; margin: 4px 6px; background: var(--line); }

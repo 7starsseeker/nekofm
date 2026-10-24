@@ -5,6 +5,82 @@
    ========================================================================== */
 'use strict';
 
+/* ==========================================================================
+   行的操作菜单（右键）—— 2026-10-24
+   --------------------------------------------------------------------------
+   用户决定：「列表中的各种功能确实不用显示，给右键菜单就行」。
+   依据是 8 个成熟列表（foobar2000 / Columns UI / MusicBee / AIMP / Quod Libet /
+   Spotify / Apple Music / 点歌机 Songify）的实测与文档：没有一家把播放/删除/收藏
+   常驻在行内。常驻 5 个控件在 1016px 的宽列表里吃掉约 380px（歌名只剩 199px），
+   在 344px 的队列栏里更是把行挤成好几层。
+
+   **为什么放在这里**：control.js 由三个互不共享作用域的 IIFE 组成
+   （主逻辑 / layoutShell / 新面板），队列行在主逻辑里画、已保存行在新面板里画，
+   所以要有一个两边都能拿到的入口。这里按本文件既有的 `window.__nekofm*`
+   约定挂到 window 上（同 `window.__nekofmMkKeepButton`）。
+   只有新外壳 `/console` 用（shell.js 会打上 `data-v2`）；旧版面 `/` 保持原样。
+   ========================================================================== */
+(function attachCtxMenu() {
+  /* 判定「用不用新外壳」只看路径，不看 `data-v2`：
+     队列行可能在 window 'load'（shell.js 打标记）之前就画好了，
+     用 DOM 标记会产生"先按旧样式画、之后再不重画"的时序竞态（实测踩过：
+     队列 3 行都还是行内 5 个按钮）。`/console` 是 shell.js 唯一的挂载点，
+     路径从第一次渲染起就是确定的。 */
+  const isV2 = () => location.pathname === '/console';
+  let el = null;
+
+  function ensure() {
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'v2ctx';
+    el.hidden = true;
+    document.body.appendChild(el);
+    const close = () => { el.hidden = true; };
+    // 捕获阶段：点在菜单外任何地方、Esc、滚列表、切窗口都收起来
+    addEventListener('mousedown', (e) => { if (!el.contains(e.target)) close(); }, true);
+    addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+    addEventListener('blur', close);
+    document.addEventListener('scroll', close, true);
+    return el;
+  }
+
+  /** items: (['-'] | {label,title?,run,danger?,disabled?})[] */
+  function openCtx(x, y, head, items) {
+    const box = ensure();
+    box.innerHTML = '';
+    if (head) {
+      const h = document.createElement('div');
+      h.className = 'hd';
+      h.textContent = head;
+      box.appendChild(h);
+    }
+    for (const it of items) {
+      if (!it) continue;
+      if (it === '-') { const s = document.createElement('div'); s.className = 'sep'; box.appendChild(s); continue; }
+      const b = document.createElement('button');
+      b.className = 'it' + (it.danger ? ' danger' : '') + (it.disabled ? ' off' : '');
+      b.textContent = it.label;
+      if (it.title) b.title = it.title;
+      if (it.disabled) b.disabled = true;
+      b.onclick = () => {
+        box.hidden = true;
+        try { it.run(); } catch (e) {
+          const msg = String((e && e.message) || e);
+          if (window.__nekofmToast) window.__nekofmToast(false, msg); else console.error(msg);
+        }
+      };
+      box.appendChild(b);
+    }
+    box.hidden = false;
+    // 贴着光标但不许出窗口（最后一行的右键也要能用）
+    const r = box.getBoundingClientRect();
+    box.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 8)) + 'px';
+    box.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 8)) + 'px';
+  }
+
+  window.__nekofmCtxMenu = { isV2, openCtx };
+})();
+
 (function () {
   const $ = (id) => document.getElementById(id);
   const api = async (body) => {
@@ -351,6 +427,10 @@
     const ul = $('queue');
     const items = qv.items || [];
     const cur = qv.current;
+    /* 队列行：新外壳下整行的控件都进右键菜单（见文件顶部 __nekofmCtxMenu 的注释）。
+       这两行必须在「正在播放」那一行之前，那个分支也要用它。 */
+    const ctxMenu = window.__nekofmCtxMenu;
+    const v2 = !!(ctxMenu && ctxMenu.isV2());
     /**
      * **内容没变就不重建 DOM。**
      *
@@ -383,7 +463,18 @@
         // 原来发 `cur.song`（undefined）于是"点了永远不生效"（2026-09-26 修）
         onAdd: () => api({ action: 'savedAdd', key: cur.key, uname: cur.uname }),
       });
-      li.appendChild(keep);
+      // 新外壳：控件收进右键菜单（队列栏只有 344px，常驻控件会把行挤成好几层）
+      if (ctxMenu && ctxMenu.isV2()) {
+        li.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          ctxMenu.openCtx(e.clientX, e.clientY, `${cur.name}${cur.uname ? ' · ' + cur.uname : ''}`, [
+            { label: keep.textContent, disabled: keep.disabled, run: () => keep.click() },
+          ]);
+        });
+      } else {
+        li.appendChild(keep);
+      }
       ul.appendChild(li);
     }
     if (!items.length) {
@@ -402,7 +493,6 @@
       top.textContent = '顶';
       top.title = '把这首提到队列最前';
       top.onclick = () => api({ action: 'queueMove', index: it.position, where: 'top' });
-      li.appendChild(top);
 
       // 拉黑：按粒度分别拉黑。**外面套个"拉黑"字样的标签** ——
       // 原来是个光秃秃的下拉框，用户根本不知道它是干什么的（实测被问过）。
@@ -423,7 +513,6 @@
       sel.title = '拉黑粒度：这首歌 / 标题关键词 / 歌手 / BV号';
       blWrap.appendChild(blLabel);
       blWrap.appendChild(sel);
-      li.appendChild(blWrap);
       const blk = document.createElement('button');
       blk.textContent = '执行';
       blk.title = '按左边选的粒度加入黑名单，并把这首先从队列撤下';
@@ -431,7 +520,6 @@
         const r = await api({ action: 'blacklistFromQueue', index: it.position, type: sel.value });
         if (r.ok) log('info', `已拉黑（${sel.options[sel.selectedIndex].textContent}）：${it.name}`);
       };
-      li.appendChild(blk);
 
       // 加入已保存（闲时）列表 —— 队列里的好歌可以留到下一场
       const keep = mkKeepButton({
@@ -440,12 +528,40 @@
         // 同上：队列项没有 song 字段，要用 key 回查
         onAdd: () => api({ action: 'savedAdd', key: it.key }),
       });
-      li.appendChild(keep);
-
       const rm = document.createElement('button');
       rm.textContent = '撤';
       rm.onclick = () => api({ action: 'remove', index: it.position });
-      li.appendChild(rm);
+
+      if (v2) {
+        /* 新外壳：顶 / 拉黑×4 / 加入已保存 / 撤 全部收进右键菜单。
+           队列栏只有 344px，原来这 5 个控件把行挤成两三层。 */
+        li.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const menu = [
+            { label: '置顶到队列最前', title: top.title, run: () => top.click() },
+            '-',
+          ];
+          for (const [v, t] of opts) {
+            menu.push({
+              label: `拉黑（${t}）`,
+              title: `按「${t}」粒度加入黑名单，并把这首先从队列撤下`,
+              run: () => { sel.value = v; blk.click(); },
+            });
+          }
+          menu.push('-');
+          menu.push({ label: keep.textContent, disabled: keep.disabled, title: keep.title, run: () => keep.click() });
+          menu.push('-');
+          menu.push({ label: '从队列移除', danger: true, title: '把这首先从当前播放列表撤下', run: () => rm.click() });
+          ctxMenu.openCtx(e.clientX, e.clientY, `${it.name}${it.uname ? ' · ' + it.uname : ''}`, menu);
+        });
+      } else {
+        li.appendChild(top);
+        li.appendChild(blWrap);
+        li.appendChild(blk);
+        li.appendChild(keep);
+        li.appendChild(rm);
+      }
 
       ul.appendChild(li);
     });
@@ -2467,7 +2583,14 @@
    * 给一行挂上**统一的管理按钮**：缓存 / 加入已保存 / 拉黑 / 删除。
    * 当前播放列表、已播放、已保存三处共用这套，行为一致，用户不用分别记。
    */
+  /* 右键菜单的实现在文件顶部（三个 IIFE 共用，队列行在主逻辑里画）。
+     这里只取两个入口，名字保持一致，下面 addItemActions 直接调用。 */
+  const isV2 = () => !!(window.__nekofmCtxMenu && window.__nekofmCtxMenu.isV2());
+  const openCtx = (...a) => window.__nekofmCtxMenu.openCtx(...a);
+
   function addItemActions(li, it, kind, onChanged) {
+    /** 收进这里的按钮不会进 DOM，只在右键菜单里出现 */
+    const acts = [];
     const mk = (text, title, fn, cls) => {
       const b = document.createElement('button');
       b.textContent = text;
@@ -2476,6 +2599,16 @@
       b.onclick = fn;
       return b;
     };
+
+    /* 「从这一首开始播整张歌单」——只在已保存列表出现（原来是 renderList 里直接
+       appendChild 的，2026-10-24 统一收进 acts，否则菜单少一条、行内还多一个按钮）。 */
+    if (kind === 'saved') {
+      acts.push({ btn: mk('从这首开始播放', '从这一首开始播放「已保存播放列表」', async () => {
+        const r = await call({ action: 'playSaved', from: it.__index });
+        const d = r.result || {};
+        if (!d.ok) toast(false, d.msg || '播放失败');
+      }) });
+    }
 
     /**
      * 缓存按钮（2026-09-26）。
@@ -2544,11 +2677,10 @@
         }
       });
       if (full) b.style.borderColor = '#2c8a4b';
-      li.appendChild(b);
+      acts.push({ btn: b });
     }
-    // 拉黑：三种粒度（歌曲 / 关键词 / 歌手）——"听到不合适，连歌手一起拉黑"很常用
+    // 拉黑粒度：菜单里展开成 4 条（原来是行内的下拉框，占位又不直观）
     const sel = document.createElement('select');
-    sel.style.cssText = 'padding:1px 4px;font-size:12px';
     for (const [v, t] of [['song', '歌曲'], ['keyword', '关键词'], ['artist', '歌手'], ['bvid', 'BV号']]) {
       const o = document.createElement('option');
       o.value = v; o.textContent = t;
@@ -2568,7 +2700,7 @@
       if (o.saved) b.disabled = true;
       return b;
     });
-    li.appendChild(mkKeep({
+    acts.push({ btn: mkKeep({
       saved: !!it.saved,
       title: '加入「已保存播放列表」，开播时作为闲时歌单循环播放',
       onAdd: async () => {
@@ -2576,18 +2708,55 @@
         if (r.result && r.result.ok) onChanged && onChanged();
         return r;
       },
-    }));
-    li.appendChild(sel);
-    li.appendChild(mk('拉黑', '按所选粒度加入黑名单', async () => {
-      const r = await call({ action: 'blacklistSong', song: it.song, type: sel.value });
-      if (r.result && r.result.ok) onChanged && onChanged();
-      else toast(false, (r.result && r.result.msg) || '拉黑失败');
-    }));
-    li.appendChild(mk('删除', kind === 'queue' ? '从当前播放列表移除' : (kind === 'history' ? '从已播放记录移除' : '从已保存列表移除'), async () => {
+    }) });
+    const blacklistBy = (type, label) => ({
+      label: `拉黑（${label}）`,
+      title: type === 'song' ? '这首歌以后不再能点' : (type === 'artist' ? '这个歌手的所有歌都不再能点' : (type === 'keyword' ? '歌名包含这个词的都不再能点' : '这个 BV 号不再能点')),
+      run: async () => {
+        const r = await call({ action: 'blacklistSong', song: it.song, type });
+        if (r.result && r.result.ok) onChanged && onChanged();
+        else toast(false, (r.result && r.result.msg) || '拉黑失败');
+      },
+    });
+    acts.push('-');
+    acts.push(blacklistBy('song', '歌曲'));
+    acts.push(blacklistBy('keyword', '关键词'));
+    acts.push(blacklistBy('artist', '歌手'));
+    acts.push(blacklistBy('bvid', 'BV号'));
+    /* 删除：菜单里叫得更具体，行内（旧版面）还是「删除」一个词。
+       动作同一份 lambda，不许两边漂移。 */
+    const doRemove = async () => {
       const act = kind === 'queue' ? 'remove' : (kind === 'history' ? 'historyRemove' : 'savedRemove');
       await call({ action: act, index: it.__index });
       onChanged && onChanged();
-    }, 'ghost'));
+    };
+    acts.push('-');
+    acts.push({
+      label: kind === 'queue' ? '从播放列表移除' : (kind === 'history' ? '从已播放移除' : '从已保存移除'),
+      danger: true,
+      run: doRemove,
+    });
+    /* 把收集到的按钮挂到右键菜单上。旧版面 `/` 不参与（见 isV2 的注释）。 */
+    if (isV2()) {
+      li.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const items = acts.map((a) => (a.btn
+          ? { label: a.btn.textContent, title: a.btn.title, disabled: a.btn.disabled, run: () => a.btn.click() }
+          : a));
+        openCtx(e.clientX, e.clientY, `${it.name || ''}${it.artistText ? ` — ${it.artistText}` : ''}`, items);
+      });
+    } else {
+      for (const a of acts) { if (a.btn) li.appendChild(a.btn); }
+      li.appendChild(sel);
+      // 旧版面保持原样：拉黑仍是「下拉 + 按钮」两个控件
+      li.appendChild(mk('拉黑', '按所选粒度加入黑名单', async () => {
+        const r = await call({ action: 'blacklistSong', song: it.song, type: sel.value });
+        if (r.result && r.result.ok) onChanged && onChanged();
+        else toast(false, (r.result && r.result.msg) || '拉黑失败');
+      }));
+      li.appendChild(mk('删除', kind === 'queue' ? '从当前播放列表移除' : (kind === 'history' ? '从已播放记录移除' : '从已保存列表移除'), doRemove, 'ghost'));
+    }
     return li;
   }
 
@@ -2640,18 +2809,7 @@
       it.__index = i + 1;
       if (extra) extra(li, it);
       if (it.song) {
-        // 已保存列表：可以直接从这一首开始播（当作整张歌单的起点）
-        if (ul.id === 'savedList') {
-          const play = document.createElement('button');
-          play.textContent = '播放';
-          play.title = '从这一首开始播放「已保存播放列表」';
-          play.onclick = async () => {
-            const r = await call({ action: 'playSaved', from: it.__index });
-            const d = r.result || {};
-            if (!d.ok) toast(false, d.msg || '播放失败');
-          };
-          li.appendChild(play);
-        }
+        // 已保存列表的「从这首开始播放」在 addItemActions 里统一收进右键菜单
         addItemActions(li, it, kindOf(ul), onChangedOf(ul));
       }
     });
