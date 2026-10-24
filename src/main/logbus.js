@@ -53,6 +53,19 @@ function _guardStdStreams() {
 /** 允许的等级（渲染层按这个配色/筛选；白名单外的一律降级为 info，但会记一行抱怨） */
 const LEVELS = ['info', 'ok', 'reject', 'warn', 'error'];
 
+/**
+ * 从文本开头的 `[engine]` / `[server]` 这类前缀里抠出模块名，作为独立字段。
+ *
+ * 为什么不改 73 处调用点：那 73 处 `this.log('[engine] …')` 的文字前缀本来就是模块名，
+ * 只是混在正文里 —— 渲染层没法单独给它上色/筛选，用户只能靠肉眼在长句里找。
+ * 在总线这一层抽出来，一处改动拿到结构化字段，调用点一个都不用动。
+ * 前缀只认"短、无空格"的方括号，避免把 `[2026-10-24] 某某` 这类正文误判成模块。
+ */
+function splitCategory(text) {
+  const m = /^\[([A-Za-z][\w.-]{0,15})\]/.exec(text);
+  return m ? m[1] : '';
+}
+
 class LogBus {
   /**
    * @param {{limit?:number, file?:string, fileLimitBytes?:number, levels?:string[]}} [opts]
@@ -108,7 +121,14 @@ class LogBus {
         try { console.warn(`[logbus] 未知日志等级「${bad}」，按 info 处理（允许：${LEVELS.join('/')}）`); } catch { /* 忽略 */ }
       }
     }
-    const line = { seq: ++this.seq, at: Date.now(), level: lv, text: String(text == null ? '' : text) };
+    const raw = String(text == null ? '' : text);
+    const line = {
+      seq: ++this.seq,
+      at: Date.now(),
+      level: lv,
+      category: splitCategory(raw),   // `[engine]` → 'engine'，渲染层用它上色/筛选
+      text: raw,
+    };
     this.lines.push(line);
     if (this.lines.length > this.limit) this.lines.splice(0, this.lines.length - this.limit);
     for (const cb of this._subs) { try { cb(line); } catch { /* 单个订阅者出错不影响别的 */ } }

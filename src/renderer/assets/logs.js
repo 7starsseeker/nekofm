@@ -25,8 +25,29 @@
   const fmtTime = (ms) => new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }) + '.' +
     String(new Date(ms).getMilliseconds()).padStart(3, '0');
 
+  /** 级别 → 显示用短标签。info 不显示标签（常态不该抢注意力）。 */
+  const LV_LABEL = { ok: '成功', reject: '没执行', warn: '注意', error: '错误' };
+  /** 「只看问题」留下这三类：需要注意 / 出错 / 没执行 */
+  const LV_PROBLEM = { reject: 1, warn: 1, error: 1 };
+
+  /**
+   * 行文本开头可能有 `HH:MM:SS ` 前缀（`tools/headless.js:39` 给命令行模式加的）。
+   * 行本身已经有时间戳了，两个连在一起会变成 `20:30:00.62612:30:00`（实测难看且差 8 小时）。
+   * 应用自己的日志行不会长这样，剥掉是安全的。
+   */
+  const stripDupTime = (s) => String(s).replace(/^\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\s+/, '');
+
+  /**
+   * 分类已经单独渲染成一个小标签了，正文里就别再重复一遍 `[engine]`。
+   * 只在**确实**以 `[分类]` 开头时剥，其他情况原样返回（别误伤正文里的方括号）。
+   */
+  function stripCat(text, cat) {
+    if (!cat) return text;
+    return text.replace(new RegExp('^\\[' + cat.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\]\\s*'), '');
+  }
+
   function match(level, text) {
-    if (errOnly && level !== 'warn' && level !== 'error') return false;
+    if (errOnly && !LV_PROBLEM[level]) return false;
     if (filter && !text.toLowerCase().includes(filter)) return false;
     return true;
   }
@@ -35,16 +56,31 @@
   function addLine(line) {
     total++;
     $('pCount').textContent = total + ' 条';
-    const hit = filter && String(line.text).toLowerCase().includes(filter);
-    if (!match(line.level, String(line.text).toLowerCase())) return;
+    const raw = stripDupTime(line.text == null ? '' : line.text);
+    const body = stripCat(raw, line.category);
+    const hit = filter && raw.toLowerCase().includes(filter);
+    if (!match(line.level, raw.toLowerCase())) return;
     const li = document.createElement('li');
-    if (line.level === 'warn' || line.level === 'error') li.className = line.level;
+    const lv = LV_LABEL[line.level];
+    if (lv) li.className = line.level;          // 只有非 info 才上色
     if (hit) li.classList.add('hit');
     const t = document.createElement('span');
     t.className = 't';
     t.textContent = fmtTime(line.at || Date.now());
     li.appendChild(t);
-    li.appendChild(document.createTextNode(line.text == null ? '' : String(line.text)));
+    if (lv) {
+      const chip = document.createElement('span');
+      chip.className = 'lv';
+      chip.textContent = lv;
+      li.appendChild(chip);
+    }
+    if (line.category) {
+      const cat = document.createElement('span');
+      cat.className = 'cat';
+      cat.textContent = '[' + line.category + ']';
+      li.appendChild(cat);
+    }
+    li.appendChild(document.createTextNode(body));
     const nearBottom = mainEl.scrollHeight - mainEl.scrollTop - mainEl.clientHeight < 40;
     linesEl.appendChild(li);
     while (linesEl.childElementCount > MAX_ROWS) linesEl.firstElementChild.remove();
@@ -72,7 +108,11 @@
       if (!r || !Array.isArray(r.lines)) return [];
       // 落盘路径由接口给出（"把日志发给别人"时用户得知道文件在哪）
       if (r.file) { $('stLogFile').textContent = r.file; $('stLogFile').title = r.file; }
-      else if ($('stLogFile').textContent.startsWith('（')) $('stLogFile').textContent = '未落盘（命令行模式）';
+      // 接口明确回了"没有文件"（命令行模式的默认形态）—— 就直接这么说。
+      // 原来这里有个 `startsWith('（')` 的守卫想靠"还是占位文案"来判断，
+      // 但占位文案是「读取中…」（`…` 而不是全角括号）⇒ 守卫永不成立，
+      // 于是这个格子永远停在「读取中…」，用户以为日志一直在加载。
+      else { $('stLogFile').textContent = '未落盘（命令行模式）'; $('stLogFile').title = ''; }
       if (afterSeq > 0) return r.lines;          // 续传：交回新增行，由调用方追加
       redraw(r.lines);                            // 首次：整屏回填
       total = r.lines.length;

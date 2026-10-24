@@ -109,12 +109,19 @@ const isOrderedItem = (item) => isOrderedUid(item && item.uid);
 
 class Engine extends EventEmitter {
   /**
-   * @param {{config:object, log?:Function, browser?:object, biliBrowser?:object, biliChannel?:object}} opts
+   * @param {{config:object, log?:Function, logEvent?:Function, browser?:object, biliBrowser?:object, biliChannel?:object}} opts
    */
-  constructor({ config, log = () => {}, browser = null, biliBrowser = null, biliChannel = null }) {
+  constructor({ config, log = () => {}, logEvent = null, browser = null, biliBrowser = null, biliChannel = null }) {
     super();
     this.config = config;
     this.log = log;
+    /**
+     * 结构化事件通道：`logEvent(level, text)` 直接把**级别**交给日志总线。
+     * 没有它的时候 notify 只能 `this.log('[warn] …')` —— 级别被拼进正文，
+     * 日志窗口拿到的全是没有级别的灰字，出问题时只能一行行读（这正是用户说的"辨识度不够"）。
+     * 不传（headless / 测试）就回落到旧行为，行为不变。
+     */
+    this.logEvent = logEvent;
     this.browser = browser || null; // 网易云「浏览器急兑」通道（Electron 注入；headless 为 null）
     // B站登录态通道：只用来把账号登进去换 cookie（字幕接口需要登录态）
     this.biliBrowser = biliBrowser || null;
@@ -430,7 +437,7 @@ class Engine extends EventEmitter {
         }
         this.emit('change');
       });
-      client.on('open', () => this.notify('info', `弹幕已连接（开放平台 · 房间 ${client.roomId}）`));
+      client.on('open', () => this.notify('ok', `弹幕已连接（开放平台 · 房间 ${client.roomId}）`));
       client.on('close', () => this.notify('warn', '开放平台长连断开，正在重连…'));
       client.on('error', () => {});
       client.on('danmaku', (d) => {
@@ -486,7 +493,7 @@ class Engine extends EventEmitter {
       }
       this.emit('change');
     });
-    dc.on('open', () => this.notify('info', `弹幕已连接（房间 ${dc.roomId}）`));
+    dc.on('open', () => this.notify('ok', `弹幕已连接（房间 ${dc.roomId}）`));
     dc.on('close', () => this.notify('warn', '弹幕连接断开，正在重连…'));
     dc.on('error', () => {});
     dc.on('danmaku', (d) => {
@@ -519,7 +526,7 @@ class Engine extends EventEmitter {
       cookie: this.config.bilibili.cookie || '',
       onFrame: (buf) => dc.feed(buf),
       onState: (s) => {
-        if (s.state === 'open') this.notify('info', `弹幕已连接（房间 ${info.roomId}）`);
+        if (s.state === 'open') this.notify('ok', `弹幕已连接（房间 ${info.roomId}）`);
         else if (s.state === 'error' || s.state === 'need-url') this.log('[engine] 弹幕通道异常:', s.err || s.state);
       },
     });
@@ -672,7 +679,7 @@ class Engine extends EventEmitter {
     }
     if (PRIVILEGED.has(c.cmd) && !this.queue.canManage(user)) {
       this.stats.rejected++;
-      return this.notify('warn', `${user.uname}：该指令需要房管/主播权限`);
+      return this.notify('reject', `${user.uname}：该指令需要房管/主播权限`);
     }
     if (c.cmd === 'skip') return this.skip(user);
     if (c.cmd === 'remove') {
@@ -732,7 +739,7 @@ class Engine extends EventEmitter {
   async orderByKeyword(keyword, source, user, { interactive = false } = {}) {
     if (!keyword || !keyword.trim()) {
       this.stats.rejected++;
-      return this.notify('warn', `${user.uname}：点歌要带上歌名哦~`);
+      return this.notify('reject', `${user.uname}：点歌要带上歌名哦~`);
     }
     // 预检：关键词直接命中黑名单就不必浪费一次网络搜索。
     // 返回值必须和 _enqueue 的拦截结果**保持同构**（{ok,reason,msg,rule}），
@@ -741,7 +748,7 @@ class Engine extends EventEmitter {
     if (pre.blocked) {
       this.stats.rejected++;
       this.stats.blocked++;
-      this.notify('warn', `${user.uname}：这首不能点（${pre.why}）`);
+      this.notify('reject', `${user.uname}：这首不能点（${pre.why}）`);
       return { ok: false, reason: 'blacklisted', msg: `已在黑名单：${pre.why}`, rule: pre.rule };
     }
     const src = source || this.config.netease.defaultSource;
@@ -763,12 +770,12 @@ class Engine extends EventEmitter {
       if (asId) return await this.orderSongById(asId[1], user);
       if (src === 'local') {
         const hits = this.local.search(keyword, 5);
-        if (!hits.length) { this.stats.rejected++; return this.notify('warn', `${user.uname}：本地曲库没找到「${keyword}」`); }
+        if (!hits.length) { this.stats.rejected++; return this.notify('reject', `${user.uname}：本地曲库没找到「${keyword}」`); }
         return this._enqueue(hits[0], user);
       }
       if (src === 'bilibili') {
         const r = await this.bili.searchVideo(keyword, { pageSize: 5 });
-        if (!r.ok || !r.results.length) { this.stats.rejected++; return this.notify('warn', `${user.uname}：B站没搜到「${keyword}」`); }
+        if (!r.ok || !r.results.length) { this.stats.rejected++; return this.notify('reject', `${user.uname}：B站没搜到「${keyword}」`); }
         const v = r.results[0];
         /**
          * **搜索点歌也要带 cid**（2026-09-26 修）：`searchVideo` 的结果里没有 cid，
@@ -789,7 +796,7 @@ class Engine extends EventEmitter {
       if (!r.ok || !r.songs.length) {
         this.stats.rejected++;
         const why = r.msg || `没搜到「${keyword}」`;
-        this.notify('warn', `${user.uname}：${why}`);
+        this.notify('reject', `${user.uname}：${why}`);
         return { ok: false, reason: r.ok ? 'notfound' : 'limit', msg: why, candidates: [] };
       }
       const m = this._pickBestMatch(keyword, r.songs);
@@ -832,7 +839,7 @@ class Engine extends EventEmitter {
 
   async orderVideo(target, user) {
     const t = String(target || '').trim();
-    if (!t) { this.stats.rejected++; return this.notify('warn', `${user.uname}：请附上 BV 号或视频链接`); }
+    if (!t) { this.stats.rejected++; return this.notify('reject', `${user.uname}：请附上 BV 号或视频链接`); }
     try {
       const info = await this.bili.videoInfo(t);
       /**
@@ -859,7 +866,7 @@ class Engine extends EventEmitter {
       }, user);
     } catch (e) {
       this.stats.rejected++;
-      return this.notify('warn', `${user.uname}：视频解析失败（${e.message}）`);
+      return this.notify('error', `${user.uname}：视频解析失败（${e.message}）`);
     }
   }
 
@@ -889,24 +896,24 @@ class Engine extends EventEmitter {
     const sid = String(id == null ? '' : id).trim();
     if (!/^\d+$/.test(sid)) {
       this.stats.rejected++;
-      return this.notify('warn', `${user.uname}：歌曲 ID 应该是数字`);
+      return this.notify('reject', `${user.uname}：歌曲 ID 应该是数字`);
     }
     try {
       const r = await this.netease.songDetail(sid);
       if (!r.ok) {
         this.stats.rejected++;
-        return this.notify('warn', `${user.uname}：按 ID 点歌失败（${r.msg || '接口错误'}）`);
+        return this.notify('error', `${user.uname}：按 ID 点歌失败（${r.msg || '接口错误'}）`);
       }
       const song = (r.songs || [])[0];
       if (!song) {
         this.stats.rejected++;
-        return this.notify('warn', `${user.uname}：网易云没有 ID 为 ${sid} 的歌曲（可能已下架）`);
+        return this.notify('reject', `${user.uname}：网易云没有 ID 为 ${sid} 的歌曲（可能已下架）`);
       }
       this.log(`[engine] 按 ID 点歌：${song.name} / ${song.artistText}（id=${song.id}）`);
       return this._enqueue(song, user);
     } catch (e) {
       this.stats.rejected++;
-      return this.notify('warn', `${user.uname}：按 ID 点歌失败（${e.message}）`);
+      return this.notify('error', `${user.uname}：按 ID 点歌失败（${e.message}）`);
     }
   }
 
@@ -922,7 +929,7 @@ class Engine extends EventEmitter {
     if (verdict.blocked) {
       this.stats.rejected++;
       this.stats.blocked++;
-      this.notify('warn', `${user.uname || '系统'}：《${song.name || song.title}》不能播（${verdict.why}）`);
+      this.notify('reject', `${user.uname || '系统'}：《${song.name || song.title}》不能播（${verdict.why}）`);
       return { ok: false, reason: 'blacklisted', msg: `已在黑名单：${verdict.why}`, rule: verdict.rule };
     }
 
@@ -930,10 +937,10 @@ class Engine extends EventEmitter {
     this.stats.ordered++;
     if (!r.ok) {
       this.stats.rejected++;
-      this.notify('warn', `${user.uname}：${r.msg}`);
+      this.notify('reject', `${user.uname}：${r.msg}`);
       return r;
     }
-    this.notify('info', `${user.uname} 点了《${song.name || song.title}》，排在第 ${r.position} 位`);
+    this.notify('ok', `${user.uname} 点了《${song.name || song.title}》，排在第 ${r.position} 位`);
     this.emit('change');
     /**
      * 入队后要不要**马上切到点歌队列**？规则（2026-09-27 按用户要求定稿）：
@@ -1519,7 +1526,7 @@ class Engine extends EventEmitter {
       }
     }
     const last = this.history.pop();
-    if (!last) { this.notify('warn', '已经是第一首了'); return null; }
+    if (!last) { this.notify('reject', '已经是第一首了'); return null; }
     if (this.track) {
       /**
        * 把**即将被切走的这首**塞回待播最前，方便再点「下一首」切回来。
@@ -2155,7 +2162,7 @@ class Engine extends EventEmitter {
       });
       // 注意：**不要**在这里手动 push recentPlayed —— 下次切走时
       // `_rememberHistory()` 会记它，这里再记一次就会重复（实测踩到）。
-      this.notify('info', `开始播放「已保存播放列表」（第 ${idx + 1}/${seq.length} 首：${item.song.name || item.song.title}）`);
+      this.notify('ok', `开始播放「已保存播放列表」（第 ${idx + 1}/${seq.length} 首：${item.song.name || item.song.title}）`);
       this.emit('change');
       return { ok: true, total: seq.length, from: idx + 1, playing: item.song.name || item.song.title };
     }
@@ -2386,7 +2393,7 @@ class Engine extends EventEmitter {
         const isOwner = ownOnly && owner && owner.uid != null && String(owner.uid) === String(user.uid);
         if (!isOwner) {
           const who = owner && owner.uname ? `（这首是「${owner.uname}」点的）` : '';
-          this.notify('warn', `${user.uname || '观众'}：只有点歌本人或主播能切这首${who}`);
+          this.notify('reject', `${user.uname || '观众'}：只有点歌本人或主播能切这首${who}`);
           return { ok: false, reason: 'not_owner', msg: '只有点歌本人或主播能切' };
         }
         this.notify('info', `${user.uname}：切掉自己点的歌`);
@@ -2545,7 +2552,7 @@ class Engine extends EventEmitter {
       if (stale()) {
         this.log(`[engine] 丢弃过期载入 seq=${seq}/${this._loadSeq}:`, song.name || song.title);
         if (process.env.NEKOFM_TRACE === '1') {
-          this.notify('warn', `载入被更新的请求取代：${song.name || song.title}（seq ${seq} → ${this._loadSeq}）`);
+          this.notify('info', `载入被更新的请求取代：${song.name || song.title}（seq ${seq} → ${this._loadSeq}）`);
         }
         return;
       }
@@ -3069,7 +3076,7 @@ class Engine extends EventEmitter {
         enabled: this.config.local && this.config.local.autoSaveLyrics !== false,
       });
       if (saved.ok && saved.written && saved.written.length) {
-        this.notify('info', `已把歌词保存到歌曲旁边：${saved.written.map((f) => path.basename(f)).join('、')}`);
+        this.notify('ok', `已把歌词保存到歌曲旁边：${saved.written.map((f) => path.basename(f)).join('、')}`);
         this.log('[engine] 已保存旁车歌词:', saved.written.join(', '));
       } else if (saved.ok === false && saved.msg) {
         this.log('[engine] 旁车歌词未能保存:', saved.msg);
@@ -3317,9 +3324,9 @@ class Engine extends EventEmitter {
       const parts = [];
       if (r.audio.ok) parts.push(`音频 ${r.audio.mb || 0}MB`);
       if (r.lyrics.ok) parts.push('歌词');
-      this.notify('info', parts.length ? `已删除《${name}》的缓存（${parts.join(' + ')}）` : `《${name}》本来就没有缓存`);
+      this.notify('ok', parts.length ? `已删除《${name}》的缓存（${parts.join(' + ')}）` : `《${name}》本来就没有缓存`);
     } else {
-      this.notify('warn', `《${name}》：${r.audio.msg || '删除失败'}（歌词${
+      this.notify('error', `《${name}》：${r.audio.msg || '删除失败'}（歌词${
         r.lyrics.ok ? '已删除' : '未删除'}）`);
     }
     this.emit('change');
@@ -3416,7 +3423,7 @@ class Engine extends EventEmitter {
       // 半截：说清哪一半没成，并告诉用户还能再试（下次点「补缓存」会重新检测）
       this.notify('warn', `《${name}》只缓存了一半 —— 音频：${side(out.audio)}；歌词：${side(out.lyrics)}。下次点「补缓存」会再检测一次`);
     } else {
-      this.notify('warn', `《${name}》缓存失败 —— 音频：${side(out.audio)}；歌词：${side(out.lyrics)}`);
+      this.notify('error', `《${name}》缓存失败 —— 音频：${side(out.audio)}；歌词：${side(out.lyrics)}`);
     }
     this.emit('change');
     return out;
@@ -3499,7 +3506,7 @@ class Engine extends EventEmitter {
     }
 
     if (audio || lyrics) {
-      this.notify('info', `已清理 ${audio} 条音频 + ${lyrics} 条歌词缓存（约 ${Number((freed / 1048576).toFixed(1))} MB）`
+      this.notify('ok', `已清理 ${audio} 条音频 + ${lyrics} 条歌词缓存（约 ${Number((freed / 1048576).toFixed(1))} MB）`
         + (failed.length ? `；${failed.length} 条文件被占用已跳过（停掉播放再清）` : ''));
     } else {
       this.notify(failed.length ? 'warn' : 'info', failed.length
@@ -3567,7 +3574,7 @@ class Engine extends EventEmitter {
           }
           this.emit('change');
         }
-        this.notify('info', `批量缓存完成：${songs.length} 首处理完毕（新增音频 ${audio} · 歌词 ${lyrics}${fail ? ` · 失败 ${fail}` : ''}）`);
+        this.notify('ok', `批量缓存完成：${songs.length} 首处理完毕（新增音频 ${audio} · 歌词 ${lyrics}${fail ? ` · 失败 ${fail}` : ''}）`);
       } finally {
         this._prefetching = false;
         this._prefetchDone = 0;
@@ -3861,7 +3868,15 @@ class Engine extends EventEmitter {
     this.notices.unshift(n);
     if (this.notices.length > 30) this.notices.length = 30;
     this.emit('notice', n);
-    this.log(`[${level}] ${text}`);
+    /**
+     * 走结构化通道时**级别不再进正文**：日志窗口按 level 上色、按 category 分组，
+     * 正文保持干净（`[engine]` 前缀由 logEvent 那边补，别在这里加第二层方括号）。
+     */
+    if (this.logEvent) {
+      try { this.logEvent(level, text); } catch (e) { this.log('[engine] 事件写入日志失败', e.message); }
+    } else {
+      this.log(`[${level}] ${text}`);
+    }
     return n;
   }
 

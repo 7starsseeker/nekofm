@@ -46,9 +46,33 @@
   #lines { margin: 0; padding: 0; list-style: none; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
   #lines li { padding: 1px 12px; white-space: pre-wrap; word-break: break-all; border-bottom: 1px solid #141a22; }
   #lines li .t { color: #5d6b7d; margin-right: 8px; }
+  /* ---------------------------------------------------------------
+     级别的辨识度（2026-10-24）
+     -----------------------------------------------------------------
+     改之前：只有 warn / error 两级有颜色，其余一律灰字；而 warn 又被当成
+     "任何没做成的事"在用（73 处 notify 里 41% 是 warn），于是整屏发黄、
+     真正该看的（会员曲只有 45 秒试听、缓存失败）和"你没权限点这首"混在一起。
+     现在：**颜色 + 文字标签一起上**（只靠颜色对色弱无效，而且黄字已经被用滥了）。
+       ok      成功        —— 绿，低调（常态不该抢注意力）
+       reject  没执行      —— 灰金，不刺眼（用户做错了，不是系统出问题）
+       warn    需要注意    —— 黄
+       error   出错        —— 红 + 淡红底
+     --------------------------------------------------------------- */
+  #lines li .lv {
+    display: inline-block; min-width: 3.6em; margin-right: 8px; padding: 0 6px;
+    border-radius: 4px; font-size: 11px; text-align: center; opacity: .95;
+  }
+  #lines li .cat { color: #647687; margin-right: 8px; font-size: 11px; }
+  #lines li.ok { color: #9ff0c4; }
+  #lines li.ok .lv { background: rgba(74, 222, 128, .14); color: #9ff0c4; }
+  #lines li.reject { color: #e6cf9a; }
+  #lines li.reject .lv { background: rgba(230, 207, 154, .12); color: #e6cf9a; }
   #lines li.warn { color: #ffd98a; }
+  #lines li.warn .lv { background: rgba(251, 191, 36, .16); color: #ffd98a; }
   #lines li.error { color: #ff9db0; background: rgba(120, 24, 32, .18); }
+  #lines li.error .lv { background: rgba(248, 113, 113, .2); color: #ffb3c0; }
   #lines li.hit { background: rgba(126, 231, 255, .12); }
+  #lines li.hit .t { color: #7ee7ff; }
   footer { padding: 6px 12px; border-top: 1px solid #1e2530; color: var(--dim); font-size: 12px; display: flex; gap: 10px; }
   .hint { color: #5d6b7d; }
 </style>
@@ -60,7 +84,7 @@
     <span id="pCount" class="pill">0 条</span>
     <span class="spacer"></span>
     <input id="filter" type="text" placeholder="过滤关键字（如 netease / 错误代码）" />
-    <button id="btnErrOnly">只看警告/错误</button>
+    <button id="btnErrOnly" title="只留下「需要注意 / 出错 / 没执行」三类 —— 点歌没反应、缓存失败这类问题都在这三类里">只看问题</button>
     <button id="btnPause">暂停滚动</button>
     <button id="btnCopy">复制全部</button>
     <button id="btnClear">清屏</button>

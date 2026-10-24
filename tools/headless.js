@@ -33,7 +33,19 @@ const flag = (name, def = null) => {
 };
 const has = (name) => argv.includes('--' + name);
 
-const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+/**
+ * 命令行版的 console 包装。
+ *
+ * 时间戳用**独立的 write** 输出，不要塞进 `console.log` 的参数里：
+ * 日志总线（`src/main/logbus.js`）会把 console 的实参当成正文，
+ * 前缀混在正文开头会带来两个真实故障（都踩过）：
+ *   1. 行本身已有时间戳 ⇒ 界面上显示成 `20:30:00.62612:30:00`（两串粘在一起，还差 8 小时）；
+ *   2. `[engine]` 这类分类前缀不再在行首 ⇒ 分类字段提取失败，日志窗口只剩一句长灰字。
+ */
+const log = (...a) => {
+  process.stdout.write(new Date().toISOString().slice(11, 19) + ' ');
+  console.log(...a);
+};
 
 (async () => {
   const { dir, file } = configPath();
@@ -46,18 +58,26 @@ const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
   const port = Number(flag('port', config.server.port)) || 37821;
   config.server.port = port;
 
-  const engine = new Engine({ config, log });
-  const saveConfig = (cfg) => { try { fs.writeFileSync(file, JSON.stringify(cfg, null, 2)); } catch { /* 忽略 */ } };
-
   /**
    * 运行日志总线（与 Electron 版同一条路，供 `/logs` 窗口用）。
    * **命令行这边默认不落盘**：headless 常用于测试，一旦忘了隔离数据目录，
    * 落盘就会往用户的真实 `data/` 里写文件；而它本来就有真控制台，
    * 文件日志只在"打包成 exe"时才真正必要。
+   *
+   * 必须在 `new Engine(...)` **之前**建好：`notify()` 要靠 `logEvent` 把「级别+分类」
+   * 交给总线。没有它，notify 只能退化成 `this.log('[级别] 正文')`，级别被拼进正文，
+   * 日志窗口拿到的永远是灰字 info —— 那正是「日志辨识度不够」的根因。
    */
   const { LogBus } = require('../src/main/logbus');
   const logBus = new LogBus({ file: '' });
   logBus.install();
+
+  const engine = new Engine({
+    config,
+    log,
+    logEvent: (level, text) => logBus.push(level, `[engine] ${text}`),
+  });
+  const saveConfig = (cfg) => { try { fs.writeFileSync(file, JSON.stringify(cfg, null, 2)); } catch { /* 忽略 */ } };
 
   const handleCommand = createCommandHandler({
     engine,

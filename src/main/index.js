@@ -772,6 +772,11 @@ app.whenReady().then(async () => {
   engine = new Engine({
     config,
     log: (...a) => console.log(...a),
+    /**
+     * 语义事件走结构化通道：级别直接给到日志总线（不再拼成 `[warn] …` 塞进正文）。
+     * 前缀 `[engine]` 由这里补，这样 category 抽取规则与其余 33 处 `this.log('[engine] …')` 一致。
+     */
+    logEvent: (level, text) => logBus.push(level, `[engine] ${text}`),
     browser: browserFallback,
     biliBrowser,
     biliChannel,

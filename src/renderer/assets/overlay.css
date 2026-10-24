@@ -394,6 +394,10 @@ body.preview-mode .overlay-canvas { top: var(--preview-bar-h, 33px); }
   transition: opacity .3s ease;
 }
 .notice[hidden] { display: none; }
+/* 五级（2026-10-24）：ok=做成了一件事、reject=没执行（权限/歌名不对等）。
+   这两级以前都挤在 info/warn 里，观众侧看到一片黄。 */
+.notice.ok { background: rgba(20, 78, 48, .86); }
+.notice.reject { background: rgba(92, 74, 24, .86); }
 .notice.warn { background: rgba(120, 78, 0, .82); }
 .notice.error { background: rgba(120, 24, 32, .85); }
 .notice.info { background: rgba(16, 60, 74, .82); }
