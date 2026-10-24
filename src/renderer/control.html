@@ -285,6 +285,12 @@
      由控件按自己的宽度决定（它只有几十像素，不需要让位）。 */
   @media (max-width: 1120px) { .pb-meta { flex: 0 1 96px; } .pb-line2 { display: none; } }
 </style>
+<!--
+  新版外壳（段1 方案 B）：只在 `/console` 生效，`/` 完全不加载它的逻辑。
+  它**不改任何卡片标记、不动任何 id**，只把现有卡片重新分堆到"面"里，
+  并把大段说明折叠起来。老版面是它的保底：窗口指回 `/` 即回到原样。
+-->
+<link rel="stylesheet" href="/assets/ui/shell.css" />
 </head>
 <body>
 <header>
@@ -912,5 +918,7 @@
 <!-- 竖刻度音量控件：控制台与播放核心窗共用同一份实现（每格 2%、面板开合、动态音量开关） -->
 <script src="/shared/volume-dial.js"></script>
 <script src="/assets/control.js"></script>
+<!-- 新版外壳：必须排在 control.js 之后（要等它把卡片搬进页签后再重新分堆） -->
+<script src="/assets/ui/shell.js"></script>
 </body>
 </html>

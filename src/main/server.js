@@ -269,7 +269,13 @@ class AppServer {
     if (p === '/stream/img') return this._streamImage(u, req, res);
 
     // 静态页
-    const map = { '/': 'control.html', '/player': 'player.html', '/overlay': 'overlay.html', '/logs': 'logs.html', '/candidates': 'candidates.html' };
+    /**
+     * `/console` 与 `/` 是**同一个文件**：新版外壳（段1 方案 B）由
+     * `assets/ui/shell.js` 按 `location.pathname` 决定是否接管版面。
+     * 这样新老两版共用一份卡片标记与全部事件绑定，老版 `/` 的行为一个字节都没变，
+     * 出问题把窗口指回 `/` 就退回旧版面，不需要回滚代码。
+     */
+    const map = { '/': 'control.html', '/console': 'control.html', '/player': 'player.html', '/overlay': 'overlay.html', '/logs': 'logs.html', '/candidates': 'candidates.html' };
     if (map[p]) return this._file(res, path.join(this.rendererDir, map[p]));
     if (p.startsWith('/assets/')) {
       const rel = p.slice('/assets/'.length).replace(/\.\./g, '');

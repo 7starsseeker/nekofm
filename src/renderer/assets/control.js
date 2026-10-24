@@ -2378,7 +2378,18 @@
   function cardTitle(card) {
     const h = card.querySelector('h2');
     if (!h) return '';
-    return (h.textContent || '').replace(/\s*[\d,]+.*$/, '').trim();
+    /**
+     * 只取 h2 的**第一个文本节点**，不要 textContent。
+     * 为什么：h2 里常挂一个由 JS 填字的计数 span（`已播放 <span id="histCount">`），
+     * 而它什么时候被填上取决于异步取数的快慢 —— 用 textContent 的话，
+     * 同一张卡在"填字前"和"填字后"算出两个不同标题，落到两个不同页签
+     * （实测：段1 加了一个 <link> 就改变了时序，「已保存播放列表 共 190 首」
+     * 从 saved 整块漏进 more，让「已保存」页签从 3 张卡变成 2 张）。
+     * 取第一个文本节点 = 拿 HTML 里写死的那个标题，与取数时机无关。
+     */
+    const first = Array.prototype.find.call(h.childNodes, (n) => n.nodeType === 3);
+    const text = first ? first.textContent : h.textContent;
+    return (text || '').replace(/\s*[\d,]+.*$/, '').trim();
   }
 
   function build() {

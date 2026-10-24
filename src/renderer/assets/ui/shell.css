@@ -1,0 +1,170 @@
+/* ==========================================================================
+   NekoFM 新版外壳（段1 · 方案 B）—— 只在 /console 生效
+   --------------------------------------------------------------------------
+   为什么是"另存一层"而不是改原版面：
+     `/` 与 `/console` 指向同一个 control.html，这份 CSS 只在
+     `html[data-v2="1"]` 下生效，而那个属性由 assets/ui/shell.js 在
+     `location.pathname === '/console'` 时才打上。
+     ⇒ 旧版面一个字节都不变，新版面出问题把窗口指回 `/` 就是完整回退。
+
+   版面（1200×840 实测）：
+     ┌────────────────────────────────────────────┐
+     │ header：logo + 4 个状态 pill（地址去「叠加层」面）│
+     ├────────┬────────────────────────┬────────────┤
+     │ 左导航  │ 当前面（卡片网格）       │ 队列常驻栏  │
+     │ 直播台  │                        │ 当前播放列表 │
+     │ 曲库    │                        │            │
+     │ 叠加层  │                        │            │
+     │ 审核诊断│                        │            │
+     │ ──────│                        │            │
+     │ 设置    │                        │            │
+     ├────────┴────────────────────────┴────────────┤
+     │ footer#playerBar（原样）                      │
+     └────────────────────────────────────────────┘
+   队列恒在右侧，切面不消失 —— 因为"切歌/看队列/点歌"是直播时三个并列的高频动作。
+   ========================================================================== */
+
+/* ---------------------------------------------------------------- 骨架 */
+html[data-v2="1"] body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  /* header / 主体 / 播放器栏 / 歌词条（歌词条默认 hidden，不占行） */
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  height: 100vh;
+  overflow: hidden;
+}
+html[data-v2="1"] header { grid-row: 1; padding: 8px 14px; gap: 10px; }
+/* 分页容器与新外壳互斥：页签、main、aside 全部让位 */
+html[data-v2="1"] main,
+html[data-v2="1"] aside,
+html[data-v2="1"] #tabs,
+html[data-v2="1"] body > .tip { display: none !important; }
+html[data-v2="1"] footer#playerBar { grid-row: 3; }
+html[data-v2="1"] #lyricStrip { grid-row: 4; }
+
+#v2wrap {
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: 156px minmax(0, 1fr) 344px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------- 左导航 */
+#v2nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--line);
+  background: #0e141b;
+  overflow: auto;
+}
+#v2nav .v2-nav-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #9fb0c4;
+  font-size: 13px;
+  cursor: pointer;
+}
+#v2nav .v2-nav-btn:hover { background: #172030; border-color: transparent; }
+#v2nav .v2-nav-btn.active { background: #14313d; color: #d9f6ff; font-weight: 600; }
+/* 设置钉在底部：MS 的「app settings」规范就要求入口是导航的最后一项 */
+#v2nav .v2-nav-spacer { flex: 1 1 auto; min-height: 12px; }
+#v2nav .v2-nav-sep { height: 1px; background: var(--line); margin: 6px 4px; }
+/* 逃生门：回旧版面。做成低调的链接而不是按钮 —— 它不是日常动作。 */
+#v2nav .v2-nav-back {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #647687;
+  text-decoration: none;
+}
+#v2nav .v2-nav-back:hover { background: #172030; color: #a9bccf; }
+
+/* ------------------------------------------------------------ 中间的内容面 */
+#v2main { overflow: auto; padding: 12px 14px; min-width: 0; }
+.v2face { display: none; }
+.v2face.active {
+  display: grid;
+  /* 卡片按可用宽度自动分列：这就是"翻页太长"的正解 —— 不是把卡片做小，
+     而是让两列并排，同样的内容高度直接减半。
+     下限取 330px：主区在 1200 窗口下是 700px，360 会差 32px 只排一列（实测踩过），
+     330 正好两列（330×2 + 12 间距 = 672 ≤ 700）。 */
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  align-content: start;
+  align-items: start;   /* 各卡片按自己的内容高度，不被同行拉高留空洞 */
+  gap: 12px;
+}
+#v2main .card { margin: 0; min-width: 0; }
+/* 直播台是"一个舞台 + 一个输入框"，卡片不需要两列 */
+.v2face[data-face="live"] { grid-template-columns: minmax(0, 1fr); }
+/* 设置面全是表单：两列会把「每人同时最多 2 首・冷却 60 秒」这类行内单位挤断行
+   （1200 窗口实测），所以单列并给内容宽度上限。低频面允许滚动。 */
+.v2face[data-face="settings"] { grid-template-columns: minmax(0, 1fr); }
+.v2face[data-face="settings"] > .card { max-width: 720px; }
+
+/* ------------------------------------------------------------ 队列常驻栏 */
+#v2rail {
+  overflow: auto;
+  padding: 12px 12px 12px 0;
+  border-left: 1px solid var(--line);
+  background: #0e141b;
+  min-width: 0;
+}
+#v2rail .card {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  margin: 0;
+}
+/* 队列列表吃掉剩余高度：队列是这一栏唯一的主角 */
+#v2rail .card > #queue {
+  flex: 1 1 auto;
+  max-height: none;
+  overflow: auto;
+}
+
+/* --------------------------------------------------------- 说明文字折叠 */
+/* 旧版面 106 段 / 3822 字说明常驻在卡片里；这里改成默认收起的一行「说明」。
+   不搬到另一个面，是因为说明与旁边的控件强相关（"为什么这个按钮是这样"），
+   搬走就丢上下文；折叠达到同样效果而不丢信息。 */
+.v2-notes { margin-top: 10px; border-top: 1px dashed #1d2632; }
+.v2-notes > summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: 12px;
+  color: #7d8ea3;
+  padding: 6px 0 2px;
+  user-select: none;
+}
+.v2-notes > summary::-webkit-details-marker { display: none; }
+.v2-notes > summary::before { content: '？ '; color: #4f6478; }
+.v2-notes > summary:hover { color: #a9bccf; }
+.v2-notes[open] > summary { color: #a9bccf; }
+.v2-notes .tip { font-size: 12px; color: #8fa2b7; line-height: 1.7; padding: 4px 0 6px; }
+.v2-notes:not([open]) .tip { display: none; }
+
+/* ------------------------------------------------------------ 窄窗适配 */
+/* 窗口最小宽度是 920（src/main/index.js 的 minWidth）：
+   920 - 156 - 344 = 420 给内容，两列放不下 ⇒ 收窄导航与队列栏。 */
+@media (max-width: 1080px) {
+  /* 64px 才能放下 4 个 11px 汉字（审核诊断）；56px 会折成两行（实测）。 */
+  #v2wrap { grid-template-columns: 64px minmax(0, 1fr) 296px; }
+  #v2nav { padding: 10px 4px; }
+  #v2nav .v2-nav-btn,
+  #v2nav .v2-nav-back {
+    text-align: center;
+    padding: 7px 2px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .v2face.active { grid-template-columns: minmax(0, 1fr); }
+}

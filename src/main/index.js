@@ -340,7 +340,14 @@ function createControlWindow(port) {
   // 先挂监听、再 loadURL —— 反过来的话，本地页面加载太快时
   // dom-ready/did-finish-load 会在挂上监听之前就触发，标志位永远设不上（实测竞态）
   markLoaded('control')(winControl.webContents);
-  winControl.loadURL(base + '/');
+  /**
+   * 段1（2026-10-24）：默认页从 `/` 换成 `/console` —— 两者是同一个 control.html，
+   * 差别只在 `assets/ui/shell.js` 是否接管版面。
+   * 想回旧版面：`NEKOFM_CONTROL_PAGE=/` 启动，或在新界面左栏底部点「旧版界面」。
+   * 留这条环境变量是刻意的：改版面出问题时不用回滚代码，换个页就能对照。
+   */
+  const controlPage = process.env.NEKOFM_CONTROL_PAGE === '/' ? '/' : '/console';
+  winControl.loadURL(base + controlPage);
   const presentControl = (why) => {
     if (!winControl || winControl.isDestroyed()) return;
     if (!winControl.isVisible()) winControl.show();
