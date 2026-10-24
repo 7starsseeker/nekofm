@@ -41,8 +41,8 @@
     "link-data": "node tools/link-data.js"
   },
   "devDependencies": {
-    "electron": "^33.4.11",
-    "electron-builder": "^25.1.8"
+    "electron": "^43.8.3",
+    "electron-builder": "^26.18.0"
   },
   "engines": {
     "node": ">=22"
