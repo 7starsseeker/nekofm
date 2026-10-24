@@ -59,6 +59,148 @@
      * 按钮被换成新节点，click 就不会触发，表现成"点『撤』没反应""点『拉黑』没反应"
      * （实测被反馈）。用签名比较，只有队列真的变了才重画。
      */
+    /**
+     * 队列行的**动作定义（唯一真相）**。
+     * v2 把它喂给右键菜单，v1 直接把节点挂到行上 —— 同一份逻辑，两种落点。
+     * 为什么两条路并存：v1 是回滚保底面，冻结不动；v2 走 lit 模板（行内零控件）。
+     */
+    const BL_OPTS = [['song', '这首歌'], ['keyword', '标题关键词'], ['artist', '歌手'], ['bvid', 'BV号']];
+
+    function buildQueueActs(it) {
+      const top = document.createElement('button');
+      top.textContent = '顶';
+      top.title = '把这首提到队列最前';
+      top.onclick = () => api({ action: 'queueMove', index: it.position, where: 'top' });
+
+      // 拉黑：外面套个"拉黑"字样的标签 ——
+      // 原来是个光秃秃的下拉框，用户根本不知道它是干什么的（实测被问过）。
+      const blWrap = document.createElement('span');
+      blWrap.className = 'bl-wrap';
+      blWrap.title = '选择拉黑的粒度，再点右边的「拉黑」';
+      const blLabel = document.createElement('span');
+      blLabel.className = 'bl-label';
+      blLabel.textContent = '拉黑';
+      const sel = document.createElement('select');
+      BL_OPTS.forEach(([v, t]) => {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = t;
+        sel.appendChild(o);
+      });
+      sel.value = it.source === 'bilibili' ? 'bvid' : 'song';
+      sel.title = '拉黑粒度：这首歌 / 标题关键词 / 歌手 / BV号';
+      blWrap.appendChild(blLabel);
+      blWrap.appendChild(sel);
+      const blk = document.createElement('button');
+      blk.textContent = '执行';
+      blk.title = '按左边选的粒度加入黑名单，并把这首先从队列撤下';
+      blk.onclick = async () => {
+        const r = await api({ action: 'blacklistFromQueue', index: it.position, type: sel.value });
+        if (r.ok) log('info', `已拉黑（${sel.options[sel.selectedIndex].textContent}）：${it.name}`);
+      };
+
+      // 加入已保存（闲时）列表 —— 队列里的好歌可以留到下一场
+      const keep = mkKeepButton({
+        saved: it.saved,
+        title: '加入「已保存播放列表」，开播时作为闲时歌单循环播放',
+        // 队列项没有 song 字段（精简版 `_brief`），要用 key 回查
+        onAdd: () => api({ action: 'savedAdd', key: it.key }),
+      });
+      const rm = document.createElement('button');
+      rm.textContent = '撤';
+      rm.onclick = () => api({ action: 'remove', index: it.position });
+      return { top, blWrap, sel, blk, keep, rm };
+    }
+
+    /** 把 buildQueueActs 的结果翻译成右键菜单项。 */
+    function queueMenuOf(it, a) {
+      const menu = [{ label: '置顶到队列最前', title: a.top.title, run: () => a.top.click() }, '-'];
+      for (const [v, t] of BL_OPTS) {
+        menu.push({
+          label: `拉黑（${t}）`,
+          title: `按「${t}」粒度加入黑名单，并把这首先从队列撤下`,
+          run: () => { a.sel.value = v; a.blk.click(); },
+        });
+      }
+      menu.push('-');
+      menu.push({ label: a.keep.textContent, disabled: a.keep.disabled, title: a.keep.title, run: () => a.keep.click() });
+      menu.push('-');
+      menu.push({ label: '从队列移除', danger: true, title: '把这首先从当前播放列表撤下', run: () => a.rm.click() });
+      return menu;
+    }
+
+    /**
+     * 用 lit 画队列列（patch，不清空重建）。
+     *
+     * 这里是 lit 收益最大的地方：这是 **10Hz 热路径**，以前靠
+     * `ul.dataset.sig` 签名比较 + `busy`（原生下拉展开时不重画）两个 hack
+     * 来回避"整列重建把 mousedown/mouseup 之间的节点换掉"的毛病。
+     * lit 本身就是最小 diff、节点复用，这两个 hack 在 v2 侧可以退休。
+     */
+    function paintQueueLit(ul, cur, items) {
+      const { html, render, nothing } = window.__nekofmLit;
+      // 首次由 lit 接管时，容器里可能还留着第一帧（lit 未加载时）legacy 拼的行 ——
+      // render() 是**追加**不是替换，不先清一次同一个行会出现两份。
+      if (!ul.__litOwned) { ul.textContent = ''; ul.__litOwned = true; }
+
+      const rows = [];
+      if (cur) {
+        // 正在放的那首可能不在待播列表里（从「已播放」回退 / 手动播了队列之外的歌单）
+        // —— 如实说明一句，免得用户以为列表丢歌
+        const where = !cur.outsideQueue ? '正在播放'
+          : (cur.outsideKind === 'idle' ? '正在播放（列表之外的歌单）' : '正在播放（从已播放回退）');
+        rows.push(html`<li class="q-current" data-cur="1">
+          <span class="idx">▶</span>
+          <span class="nm" title=${cur.name}>${cur.name}</span>
+          <span class="by">${where}${cur.artistText ? ' · ' + cur.artistText : ''}</span>
+          ${cur.uname ? html`<span class="by">${cur.uname}</span>` : nothing}
+        </li>`);
+      }
+      if (!items.length) {
+        rows.push(html`<li><span class="tip">队列为空，等弹幕点歌或在上方点歌</span></li>`);
+      }
+      items.forEach((it) => {
+        rows.push(html`<li data-pos=${it.position}>
+          <span class="idx">${it.position}</span>
+          <span class="nm" title=${it.name}>${it.name}</span>
+          <span class="by">${it.artistText || ''}</span>
+          ${it.uname ? html`<span class="by">${it.uname}</span>` : nothing}
+        </li>`);
+      });
+
+      render(rows, ul);
+      ul.__q = { cur, items };
+
+      // 监听器只挂一次（挂在 ul 上做事件委托）——
+      // 每次右键现造动作节点：这些动作用完就丢，不会随 10Hz 反复创建。
+      if (!ul.__ctxBound) {
+        ul.__ctxBound = true;
+        ul.addEventListener('contextmenu', (e) => {
+          const li = e.target.closest('li');
+          const ctxMenu = window.__nekofmCtxMenu;
+          if (!li || !ctxMenu || !ul.__q) return;
+          e.preventDefault();
+          e.stopPropagation();
+          if (li.dataset.cur) {
+            const cur0 = ul.__q.cur;
+            if (!cur0) return;
+            const keep = mkKeepButton({
+              saved: cur0.saved,
+              title: '加入「已保存播放列表」，开播时作为闲时歌单',
+              onAdd: () => api({ action: 'savedAdd', key: cur0.key, uname: cur0.uname }),
+            });
+            ctxMenu.openCtx(e.clientX, e.clientY,
+              `${cur0.name}${cur0.uname ? ' · ' + cur0.uname : ''}`,
+              [{ label: keep.textContent, disabled: keep.disabled, run: () => keep.click() }]);
+            return;
+          }
+          const it = (ul.__q.items || []).find((x) => String(x.position) === String(li.dataset.pos));
+          if (!it) return;
+          ctxMenu.openCtx(e.clientX, e.clientY,
+            `${it.name}${it.uname ? ' · ' + it.uname : ''}`, queueMenuOf(it, buildQueueActs(it)));
+        });
+      }
+    }
+
     function renderQueue(s) {
       const q = (s && s.queue) || {};
       /**
@@ -90,6 +232,11 @@
       const ctxMenu = window.__nekofmCtxMenu;
       const v2 = !!(ctxMenu && ctxMenu.isV2());
 
+      /* v2 + lit 已就绪：走 patch，不重建。
+         lit 复用节点 ⇒ 「重建把 mousedown/mouseup 之间的按钮换掉」不再发生，
+         下面那套 qSig 签名比较与 busy（下拉展开时不重画）在 v2 侧不再需要。 */
+      if (v2 && window.__nekofmLit && window.__nekofmLit.render) { paintQueueLit(ul, cur, items); return; }
+
       const qSig = (cur ? cur.key : '-') + '|' + items.map((it) => it.key + ':' + it.uname).join(',');
       // 用户正在这一列里操作（比如原生下拉展开着）时一律不重画 ——
       // 原生下拉一旦被重建就会立刻收起，看起来像"点了菜单自己收回去"（实测被反馈）
@@ -115,18 +262,8 @@
           // 原来发 `cur.song`（undefined）于是"点了永远不生效"（2026-09-26 修）
           onAdd: () => api({ action: 'savedAdd', key: cur.key, uname: cur.uname }),
         });
-        // 新外壳：控件收进右键菜单（队列栏只有 344px，常驻控件会把行挤成好几层）
-        if (v2) {
-          li.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            ctxMenu.openCtx(e.clientX, e.clientY, `${cur.name}${cur.uname ? ' · ' + cur.uname : ''}`, [
-              { label: keep.textContent, disabled: keep.disabled, run: () => keep.click() },
-            ]);
-          });
-        } else {
-          li.appendChild(keep);
-        }
+        // 只剩 v1 会走到这里（v2 已在上面 return）：行内保留「加入已保存」按钮
+        li.appendChild(keep);
         ul.appendChild(li);
       }
       if (!items.length) {
@@ -140,80 +277,13 @@
         li.innerHTML = `<span class="idx">${it.position}</span><span class="nm" title="${esc(it.name)}">${esc(it.name)}</span>`
           + `<span class="by">${esc(it.artistText || '')}</span>${owner}`;
 
-        // 置顶
-        const top = document.createElement('button');
-        top.textContent = '顶';
-        top.title = '把这首提到队列最前';
-        top.onclick = () => api({ action: 'queueMove', index: it.position, where: 'top' });
-
-        // 拉黑：按粒度分别拉黑。**外面套个"拉黑"字样的标签** ——
-        // 原来是个光秃秃的下拉框，用户根本不知道它是干什么的（实测被问过）。
-        const blWrap = document.createElement('span');
-        blWrap.className = 'bl-wrap';
-        blWrap.title = '选择拉黑的粒度，再点右边的「拉黑」';
-        const blLabel = document.createElement('span');
-        blLabel.className = 'bl-label';
-        blLabel.textContent = '拉黑';
-        const sel = document.createElement('select');
-        const opts = [['song', '这首歌'], ['keyword', '标题关键词'], ['artist', '歌手'], ['bvid', 'BV号']];
-        opts.forEach(([v, t]) => {
-          const o = document.createElement('option');
-          o.value = v; o.textContent = t;
-          sel.appendChild(o);
-        });
-        sel.value = it.source === 'bilibili' ? 'bvid' : 'song';
-        sel.title = '拉黑粒度：这首歌 / 标题关键词 / 歌手 / BV号';
-        blWrap.appendChild(blLabel);
-        blWrap.appendChild(sel);
-        const blk = document.createElement('button');
-        blk.textContent = '执行';
-        blk.title = '按左边选的粒度加入黑名单，并把这首先从队列撤下';
-        blk.onclick = async () => {
-          const r = await api({ action: 'blacklistFromQueue', index: it.position, type: sel.value });
-          if (r.ok) log('info', `已拉黑（${sel.options[sel.selectedIndex].textContent}）：${it.name}`);
-        };
-
-        // 加入已保存（闲时）列表 —— 队列里的好歌可以留到下一场
-        const keep = mkKeepButton({
-          saved: it.saved,
-          title: '加入「已保存播放列表」，开播时作为闲时歌单循环播放',
-          // 同上：队列项没有 song 字段，要用 key 回查
-          onAdd: () => api({ action: 'savedAdd', key: it.key }),
-        });
-        const rm = document.createElement('button');
-        rm.textContent = '撤';
-        rm.onclick = () => api({ action: 'remove', index: it.position });
-
-        if (v2) {
-          /* 新外壳：顶 / 拉黑×4 / 加入已保存 / 撤 全部收进右键菜单。
-             队列栏只有 344px，原来这 5 个控件把行挤成两三层。 */
-          li.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const menu = [
-              { label: '置顶到队列最前', title: top.title, run: () => top.click() },
-              '-',
-            ];
-            for (const [v, t] of opts) {
-              menu.push({
-                label: `拉黑（${t}）`,
-                title: `按「${t}」粒度加入黑名单，并把这首先从队列撤下`,
-                run: () => { sel.value = v; blk.click(); },
-              });
-            }
-            menu.push('-');
-            menu.push({ label: keep.textContent, disabled: keep.disabled, title: keep.title, run: () => keep.click() });
-            menu.push('-');
-            menu.push({ label: '从队列移除', danger: true, title: '把这首先从当前播放列表撤下', run: () => rm.click() });
-            ctxMenu.openCtx(e.clientX, e.clientY, `${it.name}${it.uname ? ' · ' + it.uname : ''}`, menu);
-          });
-        } else {
-          li.appendChild(top);
-          li.appendChild(blWrap);
-          li.appendChild(blk);
-          li.appendChild(keep);
-          li.appendChild(rm);
-        }
+        // 动作定义只有一份（buildQueueActs），v1 这里只是把节点挂到行上
+        const a = buildQueueActs(it);
+        li.appendChild(a.top);
+        li.appendChild(a.blWrap);
+        li.appendChild(a.blk);
+        li.appendChild(a.keep);
+        li.appendChild(a.rm);
 
         ul.appendChild(li);
       });
