@@ -88,6 +88,11 @@ html[data-v2="1"] #lyricStrip { grid-row: 4; }
   text-decoration: none;
 }
 #v2nav .v2-nav-back:hover { background: #172030; color: #a9bccf; }
+/* ⚠️ 这条不能删。`hidden` 属性靠 UA 样式表的 `display:none` 生效，而作者样式
+   优先于 UA 样式 —— 上面那条 `display:block` 会把 `back.hidden = true` 彻底盖掉，
+   结果是"开关能写进 localStorage、入口却照旧显示"（2026-10-25 用户实测：
+   取消勾选并重启后入口仍在）。显式补一条 [hidden] 才真的藏得住。 */
+#v2nav .v2-nav-back[hidden] { display: none; }
 
 /* ------------------------------------------------------------ 中间的内容面 */
 #v2main { overflow: auto; padding: 12px 14px; min-width: 0; }

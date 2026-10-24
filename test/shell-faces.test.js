@@ -271,6 +271,28 @@ check('control.js：onLitReady(...) 的调用点必须在 litReadyHooks 声明�
   assert.ok(checked >= 1, '没找到任何 onLitReady(...) 调用点，这条断言形同虚设');
 });
 
+/* ---------------------------------------------- [hidden] 必须真的藏得住
+ *
+ * 2026-10-25 用户实测：取消勾选设置里「显示旧版界面入口」，入口照旧显示，
+ * 重启也一样。原因不是开关没生效（localStorage 写对了），而是 `.v2-nav-back`
+ * 有一条作者样式 `display:block` —— **作者样式优先于 UA 样式表**，而 `hidden`
+ * 属性正是靠 UA 的 `display:none` 生效，于是一路被盖掉。
+ * 规则：只要 CSS 给某个会被 JS `.hidden = true` 的元素设了 display，
+ * 就必须再写一条 `[hidden] { display:none }`，否则"藏"是假的。 */
+check('shell.css：设了 display 的 .v2-nav-back 必须有 [hidden] 覆盖规则', () => {
+  const css = read('src/renderer/assets/ui/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const shellJs = read('src/renderer/assets/ui/shell.js');
+  assert.ok(/\.hidden\s*=/.test(shellJs), 'shell.js 里已经没有 .hidden 赋值了 —— 这条断言需要跟着改');
+  assert.ok(
+    /#v2nav \.v2-nav-back\s*\{[^}]*display\s*:/.test(css),
+    '预期 #v2nav .v2-nav-back 带 display 声明（结构变了就更新本断言）'
+  );
+  assert.ok(
+    /#v2nav \.v2-nav-back\[hidden\][^{]*\{[^}]*display\s*:\s*none/.test(css),
+    '.v2-nav-back 设了 display 却没有 [hidden] 覆盖 —— hidden=true 会被作者样式盖掉，入口藏不住'
+  );
+});
+
 /* ------------------------------------------------------------------- 打一张地图 */
 
 console.log('\n当前归位（' + cards.length + ' 张卡）：');
