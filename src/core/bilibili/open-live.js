@@ -91,9 +91,22 @@ class OpenLiveClient extends EventEmitter {
     this.wssLink = [];
     this.ws = null;
     this.closedByUser = false;
-    this.stats = { received: 0, danmaku: 0, gifts: 0, connects: 0, reconnects: 0, lastAt: 0 };
+    this.stats = {
+      received: 0, danmaku: 0, gifts: 0, connects: 0, reconnects: 0, lastAt: 0,
+      /**
+       * **诊断计数（2026-10-25 加）**。
+       *
+       * 起因：用户开播后连官方通道，日志里**一点动静都没有** —— 分不清是
+       * ①一个 WS 帧都没收到（服务端不投递）②收到了但 cmd 名字变了（我们解析不到）
+       * ③收到了、解析了、但被引擎那边的状态挡下。这三种必须能一眼区分。
+       */
+      opCounts: Object.create(null),    // op 值 → 帧数（5=消息 3=心跳回执 8=认证回执）
+      cmdCounts: Object.create(null),   // cmd 名 → 条数
+      unknownCmds: [],                  // 见过但不认识的 cmd（每条只记一次）
+    };
     this._hbTimer = null;
     this._gameTimer = null;
+    this._watchTimer = null;
   }
 
   /** 凭据是否齐全（engine 用它决定走不走这条通道） */
@@ -174,6 +187,7 @@ class OpenLiveClient extends EventEmitter {
     this._startGameHeartbeat();
 
     await this._connectWs();
+    this._startWatch();
     return true;
   }
 
@@ -195,6 +209,19 @@ class OpenLiveClient extends EventEmitter {
     const url = this.wssLink[0];
     this.log(`[open-live] 连接弹幕长连 ${url}`);
     const ws = new WS_IMPL(url);
+    /**
+     * ⚠️ **必须显式设 `binaryType = 'arraybuffer'`**（2026-10-25 修的真 bug）。
+     *
+     * `mini-ws.js` 的 `WS_IMPL` 在「运行时自带全局 WebSocket」时会用全局实现
+     * （Node 22+ 才有；Electron 33 = Node 20 没有，所以升到 Electron 43 之后
+     * 这条路**悄悄换了实现**）。全局 WebSocket 的 `event.data` 对二进制帧默认是
+     * **`Blob`**，而下面的适配只认 Buffer / ArrayBuffer / 字符串 —— 于是每帧都被
+     * 转成 `"[object Blob]"`，解出来 0 个包 ⇒ `received` 一直是 0，**日志里一条错都没有**。
+     *
+     * 症状就是用户报的：「开播了、连上了官方通道、状态也对，但一条弹幕都收不到」。
+     * A/B 实测：同一份代码同一套凭据，Node 20 收到 `op8×1 op3×2`，Node 24 收到 0 帧。
+     */
+    try { if ('binaryType' in ws) ws.binaryType = 'arraybuffer'; } catch { /* 手写实现没有这个属性，忽略 */ }
     this.ws = ws;
 
     return new Promise((resolve, reject) => {
@@ -214,7 +241,13 @@ class OpenLiveClient extends EventEmitter {
         let buf;
         if (Buffer.isBuffer(raw)) buf = raw;
         else if (raw instanceof ArrayBuffer) buf = Buffer.from(raw);
-        else buf = Buffer.from(String(raw), 'utf8');
+        else if (typeof Blob !== 'undefined' && raw instanceof Blob) {
+          // 全局 WebSocket 默认就是这条（binaryType 没生效时的兜底，别再静默丢帧）
+          raw.arrayBuffer()
+            .then((ab) => this._onPacket(Buffer.from(ab)))
+            .catch((e) => this.log('[open-live] 读取 Blob 帧失败', e && e.message));
+          return;
+        } else buf = Buffer.from(String(raw), 'utf8');
         this._onPacket(buf);
       });
       ws.addEventListener('error', (e) => {
@@ -235,6 +268,7 @@ class OpenLiveClient extends EventEmitter {
     try { packets = biliDecode(buf); } catch (e) { this.log('[open-live] 解包失败', e.message); return; }
     for (const p of packets) {
       this.stats.received++;
+      this.stats.opCounts[p.op] = (this.stats.opCounts[p.op] || 0) + 1;
       if (p.op === OP.HEARTBEAT_REPLY) { this.stats.lastAt = Date.now(); this.emit('popularity', 0); continue; }
       if (p.op === OP.AUTH_REPLY) {
         let code = null;
@@ -260,6 +294,7 @@ class OpenLiveClient extends EventEmitter {
   _dispatch(obj) {
     const cmd = String(obj.cmd || '');
     const d = obj.data || {};
+    this.stats.cmdCounts[cmd] = (this.stats.cmdCounts[cmd] || 0) + 1;
     if (cmd === CMD.DANMAKU) {
       this.stats.danmaku++;
       this.emit('danmaku', {
@@ -300,6 +335,17 @@ class OpenLiveClient extends EventEmitter {
       this.emit('like', { type: 'like', uid: d.open_id, uname: d.uname, raw: obj });
       return;
     }
+    /**
+     * **下播/开播事件**（2026-10-25 加）。B站在长连里会推这两个，以前我们
+     * 只靠 30 秒轮询去发现开播 —— 有推送就该立即用上。
+     */
+    if (cmd === CMD.LIVE_START) { this.emit('liveStart', { roomId: this.roomId, raw: obj }); return; }
+    if (cmd === CMD.LIVE_END) { this.emit('liveEnd', { roomId: this.roomId, raw: obj }); return; }
+    if (!this.stats.unknownCmds.includes(cmd)) {
+      this.stats.unknownCmds.push(cmd);
+      // 只记一次：真出现"改名"这一种情况时，这行就是证据
+      this.log(`[open-live] 收到未处理的 cmd=${cmd || '(空)'}（已记下，不影响其它消息）`);
+    }
     this.emit('raw', obj);
   }
 
@@ -334,6 +380,61 @@ class OpenLiveClient extends EventEmitter {
   }
 
   /**
+   * **长连健康看门狗**（2026-10-25 加）。
+   *
+   * 用户的真实困惑：「开播了、连上了官方通道、也能看到状态在直播中，但日志里
+   * 一条弹幕都没有」—— 到底是服务端没投递、还是 cmd 改名了、还是被状态挡了？
+   * 这个问题不该靠猜：
+   *   - 连上 25 秒后 `received === 0` ⇒ 服务端**一个帧都没发**（最可能是开放平台
+   *     的「弹幕消息类型(DM)」没开通，长连照样能建、但服务器不推任何业务消息）
+   *   - 有帧但 `cmdCounts` 里没有 DM ⇒ cmd 名字对不上（那条 unknownCmds 日志就是证据）
+   *   - 有 DM ⇒ 通道正常，问题在引擎侧（那边有「未直播已忽略弹幕」的日志可对）
+   *
+   * 之后每 60 秒打一次统计，让"有没有在收"这件事在日志里可见。
+   */
+  _startWatch() {
+    this._stopWatch();
+    const t0 = Date.now();
+    this._watchTimer = setInterval(() => {
+      if (this.closedByUser) return;
+      const sec = Math.round((Date.now() - t0) / 1000);
+      const st = this.stats;
+      if (st.received === 0) {
+        if (sec >= 25 && !this._warnedSilent) {
+          this._warnedSilent = true;
+          this.log(`[open-live] ⚠ ${sec} 秒内一个 WS 帧都没收到（连上了但没有数据）。`
+            + `开放平台的「弹幕消息类型(DM)」未开通时就是这个现象 —— 长连能建、服务器不推任何业务消息`);
+        }
+        return;
+      }
+      const ops = Object.entries(st.opCounts).map(([k, v]) => `op${k}×${v}`).join(' ');
+      const cmds = Object.entries(st.cmdCounts).map(([k, v]) => `${k || '(空)'}×${v}`).join(' ');
+      this.log(`[open-live] 长连统计 ${sec}s：帧 ${st.received}［${ops}］弹幕 ${st.danmaku}｜cmd ${cmds || '（暂无业务消息）'}`);
+    }, 60_000);
+    if (this._watchTimer.unref) this._watchTimer.unref();
+    setTimeout(() => {
+      if (this.closedByUser) return;
+      if (this.stats.received === 0 && !this._warnedSilent) {
+        this._warnedSilent = true;
+        this.log('[open-live] ⚠ 连上 25 秒仍一个 WS 帧都没收到。开放平台的「弹幕消息类型(DM)」'
+          + '未开通时就是这个现象：长连能建、服务器不推任何业务消息。'
+          + '（申请：QQ 群 642908379 或邮件 live-open@bilibili.com）');
+      }
+    }, 25_000).unref?.();
+  }
+
+  _stopWatch() {
+    if (this._watchTimer) { clearInterval(this._watchTimer); this._watchTimer = null; }
+  }
+
+  /** 供 engine 在「直播间开播」时调用：在开播状态下重开一次项目，DM 会话才绑得上 */
+  async restartForLive() {
+    this._warnedSilent = false;
+    this.log('[open-live] 检测到直播间开播 → 重开项目，让弹幕会话按"直播中"重新建立');
+    await this._restartGame();
+  }
+
+  /**
    * 项目失效（心跳超时 / token 过期）时重开。
    * 注意要先把旧的 WS 与心跳停掉，否则会和新的连接互相打架。
    */
@@ -341,6 +442,7 @@ class OpenLiveClient extends EventEmitter {
     if (this.closedByUser) return;
     this._stopGameHeartbeat();
     this._stopWsHeartbeat();
+    this._stopWatch();
     try { if (this.ws) this.ws.close(); } catch { /* 忽略 */ }
     this.ws = null;
     this.log('[open-live] 重新开启项目…');
@@ -366,6 +468,7 @@ class OpenLiveClient extends EventEmitter {
     this.closedByUser = true;
     this._stopWsHeartbeat();
     this._stopGameHeartbeat();
+    this._stopWatch();
     try { if (this.ws) this.ws.close(); } catch { /* 忽略 */ }
     this.ws = null;
     if (this.gameId) {

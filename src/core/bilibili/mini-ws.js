@@ -5,9 +5,16 @@
  *   - `browser-channel.js`（连本机 CDP）
  *   - `open-live.js`（连 B站官方直播开放平台的长连）
  *
- * 为什么不用全局 `WebSocket`：**Electron 33 内置的是 Node 20，没有全局 WebSocket**
- * （Node 22 才默认提供）。用全局对象会让这两条通道被 Electron 版本绑死；
- * 为一个"连本机明文 ws"的需求去升 Electron 也不划算。
+ * 为什么仍然保留 MiniWebSocket：**Node 20 / Electron 33 没有全局 WebSocket**，
+ * 那时只能用它。现在（Electron 43 = Node 22+）`WS_IMPL` 会优先用运行时自带的全局
+ * 实现，迷你实现退居兜底 —— 但**不要因此以为两条实现可以随便换**：
+ *
+ * ⚠️ 2026-10-25 的线上事故就出在这里：升到 Electron 43 之后 `WS_IMPL` 悄悄从
+ * `MiniWebSocket` 换成了全局 `WebSocket`，而后者的 `event.data` 对二进制帧默认是
+ * **`Blob`**（不是 Buffer）。`open-live.js` 的适配只认 Buffer/ArrayBuffer/字符串，
+ * 每帧都被转成 `"[object Blob]"` ⇒ 解包 0 个包 ⇒ **一条弹幕都收不到，且日志里没有一个错**。
+ * 代价：用户以为"官方通道只在开播时投递弹幕"，白排查了一整轮。
+ * 结论：**用了 `WS_IMPL` 的地方，二进制帧一律显式 `binaryType='arraybuffer'`。**
  *
  * `encode` / `decode` 与 `danmaku.js` 里那套是**同一份协议**
  * （16 字节大端头：pack_len / header_size=16 / ver / op / seq），

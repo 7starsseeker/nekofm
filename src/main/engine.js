@@ -439,13 +439,20 @@ class Engine extends EventEmitter {
            * 所以这不是我们这侧收得慢，是官方通道的开播闸门。
            * 给出可执行的出路：切「浏览器通道」（用户实测未开播也能点歌成功）。
            */
-          this.notify('warn', `房间 ${info.roomId} ${what}：开放平台长连已建立，但这条官方通道`
-            + `**只在开播后投递弹幕**（实测：未开播时网页版能看到弹幕，这里收不到）。`
+          this.notify('warn', `房间 ${info.roomId} ${what}：开放平台长连已建立。`
+            + `官方通道**不保证在未开播时投递弹幕** —— 收到就会计数，收不到属于正常情况。`
             + `现在就想点歌的话，到「设置 · 弹幕点歌」把通道切到「浏览器通道」—— 那条未开播也能收`);
         }
         this.emit('change');
       });
       client.on('open', () => this.notify('ok', `弹幕已连接（开放平台 · 房间 ${client.roomId}）`));
+      /**
+       * 长连自己推的开播/下播（`LIVE_OPEN_PLATFORM_LIVE_START/END`）。
+       * 以前这两条被 `_dispatch` 丢掉，只能等 30 秒一次的轮询 —— 现在有推送就立刻用。
+       * 来源标记 `push`：既然收到了推送，说明会话本来就是活的，不需要重开项目。
+       */
+      client.on('liveStart', () => this._applyLiveStatus(1, 'push', client.roomId));
+      client.on('liveEnd', () => this._applyLiveStatus(0, 'push', client.roomId));
       client.on('close', () => this.notify('warn', '开放平台长连断开，正在重连…'));
       client.on('error', () => {});
       client.on('danmaku', (d) => {
@@ -574,6 +581,41 @@ class Engine extends EventEmitter {
   }
 
   /**
+   * 统一入口：设置直播间开播状态（轮询与长连推送两条来源共用）。
+   *
+   * **只在真的变化时**才动界面 + 发提示，避免 30 秒一次地噪。
+   * `source`：`'poll'` 轮询发现 / `'push'` 长连推送 / `'connect'` 连接时拿到。
+   */
+  _applyLiveStatus(next, source, roomId) {
+    if (next == null) return;
+    if (next === this.roomLiveStatus) return;
+    const prev = this.roomLiveStatus;
+    const where = roomId || (this.danmaku && this.danmaku.roomId) || '';
+    const srcTxt = source === 'push' ? '长连推送' : (source === 'connect' ? '连接时查询' : '轮询发现');
+    this.roomLiveStatus = next;
+    this.log(`[engine] 直播间状态 ${prev == null ? '未知' : prev} → ${next}`
+      + `（房间 ${where}，${srcTxt}）`);
+    this.emit('change');
+    if (next === 1) {
+      this.notify('ok', `直播间已开播（房间 ${where}）—— 现在开始收弹幕`);
+      /**
+       * **开播后重开一次官方项目**（2026-10-25）。
+       *
+       * 现象：项目是在「未开播」时 start 的，之后开播了却一条弹幕都收不到
+       * （连上了、心跳也在，但服务器不推业务消息）。官方项目是按开播状态投递的，
+       * 在开播状态下重新 start 一次，DM 会话才会按"直播中"建立。
+       * 只在轮询发现（说明项目是未开播时起的）时才重开；长连推送说明会话本来就是活的。
+       */
+      if (source === 'poll' && this.openLive && !this.openLive.closedByUser) {
+        this.openLive.restartForLive().catch((e) => this.log('[engine] 开播后重开官方项目失败:', e.message));
+      }
+    } else if (prev === 1) {
+      this.notify('warn', `直播间已下播（房间 ${where}）—— 官方通道会停止投递弹幕，`
+        + `想继续点歌请切浏览器通道`);
+    }
+  }
+
+  /**
    * **开播状态轮询**（2026-10-25 修）。
    *
    * 起因：用户开播后连接官方开放平台通道，控制台里「直播间状态」**一直显示未开播**，
@@ -609,18 +651,8 @@ class Engine extends EventEmitter {
     try { r = await this.bili.roomInfo(roomId); } catch { r = null; }
     if (token !== undefined && this._roomWatchToken !== token) return;
     if (!r || !r.ok || r.liveStatus == null) return;
-    if (r.liveStatus === this.roomLiveStatus) return;
-    const prev = this.roomLiveStatus;
-    this.roomLiveStatus = r.liveStatus;
-    this.log(`[engine] 直播间状态 ${prev == null ? '未知' : prev} → ${r.liveStatus}`
-      + `（房间 ${roomId}，轮询发现）`);
-    this.emit('change');
-    if (r.liveStatus === 1) {
-      this.notify('ok', `直播间已开播（房间 ${roomId}）—— 现在开始收弹幕`);
-    } else if (prev === 1) {
-      this.notify('warn', `直播间已下播（房间 ${roomId}）—— 官方通道会停止投递弹幕，`
-        + `想继续点歌请切浏览器通道`);
-    }
+    // 变化判定与提示统一收在 _applyLiveStatus 里（轮询 / 长连推送共用一套）
+    this._applyLiveStatus(r.liveStatus, 'poll', roomId);
   }
 
   _stopRoomWatch() {
