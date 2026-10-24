@@ -20,7 +20,43 @@
 (function () {
   'use strict';
 
-  if (location.pathname !== '/console') return;
+  /* -------------------------------------------------- 旧版面（`/`）的唯一一件事
+     如果用户是**从新版点「旧版界面」过来的**，就在右下角挂一个「回新版界面」
+     的小 chip —— 否则他点进去就再也找不到回来的路（2026-10-25 真实踩过：
+     旧版面没有任何指向 `/console` 的入口，只能重启程序）。
+
+     为什么用 sessionStorage 判据而不是无条件挂：旧版面要"一个字节不动"，
+     正常打开 `/` 的人不应该看到任何新东西。只有走过逃生门的人才看得到。 */
+  if (location.pathname !== '/console') {
+    (function addBackToV2Chip() {
+      var came = null;
+      try { came = sessionStorage.getItem('nekofm:cameFromV2'); } catch (e) { /* 隐身模式忽略 */ }
+      if (came !== '1') return;
+      // control.js 还要建卡片，等版面稳定了再挂
+      window.addEventListener('load', function () {
+        var a = document.createElement('a');
+        a.href = '/console';
+        a.textContent = '← 回新版界面';
+        a.title = '回到新版五面布局（数据与功能完全相同）';
+        // 内联样式：旧版面不加载 shell.css（它的规则全挂在 html[data-v2] 下）
+        // bottom 要让开底部那两条常驻条（播放器栏 100 + 歌词条 74），否则会盖住
+        // 歌词条右侧的「歌词纠错 / 收起」按钮（第一版就盖住了）。
+        a.style.cssText = [
+          'position:fixed', 'right:18px', 'bottom:186px', 'z-index:9998',
+          'padding:7px 12px', 'border-radius:9px',
+          'background:rgba(23,32,48,.94)', 'border:1px solid #35506b',
+          'color:#7ee7ff', 'font-size:12px', 'line-height:1',
+          'text-decoration:none', 'box-shadow:0 8px 24px rgba(0,0,0,.45)',
+          'cursor:pointer',
+        ].join(';');
+        a.addEventListener('click', function () {
+          try { sessionStorage.removeItem('nekofm:cameFromV2'); } catch (e) { /* ignore */ }
+        });
+        document.body.appendChild(a);
+      }, { once: true });
+    })();
+    return;
+  }
 
   /* ------------------------------------------------------------ 面的划分
      依据是用户 2026-10-24 亲口给的三个高频动作：切歌 / 队列 / 点歌（含手动搜歌）。
@@ -231,12 +267,18 @@
       nav.appendChild(b);
     });
 
-    /* 逃生门：旧版面就在 `/`，随时可以点回去看（不需要改代码、不需要重启） */
+    /* 逃生门：旧版面就在 `/`，随时可以点回去看（不需要改代码、不需要重启）。
+       注意它**是双向的**：点过去之前先把「我是从新版来的」记在 sessionStorage，
+       旧版面那边才有依据挂一个「回新版界面」的入口 —— 否则用户点进去就再也
+       找不到回来的路（2026-10-25 实际踩过）。 */
     var back = document.createElement('a');
     back.href = '/';
     back.textContent = '旧版界面';
     back.title = '回到改造前的单列分页版面（数据与功能完全相同）';
     back.className = 'v2-nav-back';
+    back.addEventListener('click', function () {
+      try { sessionStorage.setItem('nekofm:cameFromV2', '1'); } catch (e) { /* 隐身模式忽略 */ }
+    });
     nav.appendChild(back);
 
     /* -------------------------------------------------- 7) 装进文档 */
