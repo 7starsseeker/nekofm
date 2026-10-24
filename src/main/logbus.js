@@ -31,6 +31,28 @@ function fmtArgs(args) {
   }).join(' ');
 }
 
+/**
+ * 把 stdout / stderr 的 'error' 事件吃掉。
+ *
+ * 为什么必须有：打包成 exe 后从"不会等待的父进程"启动（PowerShell 的 `& exe --smoke`、
+ * 某些快捷方式/更新器）时，父进程一退出管道就断，之后**第一条 console.log 就会失败**。
+ * 这个失败是**异步的 'error' 事件**，不是同步 throw —— `try { console.log() } catch {}`
+ * 抓不住它（踩过：主进程弹出 "A JavaScript error occurred in the main process"、
+ * `Error: EPIPE: broken pipe, write` 停在 logbus.js 的 console 包装里，界面卡死）。
+ * 对一个 GUI 程序来说"日志写不出去"永远不该是致命错误，所以这里直接咽掉：
+ * 环形缓冲和 logs.txt 才是日志的正经去处，stdout 只是顺带。
+ */
+function _guardStdStreams() {
+  for (const s of [process.stdout, process.stderr]) {
+    if (s && typeof s.on === 'function') {
+      s.on('error', () => { /* EPIPE 等：咽掉，见上面的注释 */ });
+    }
+  }
+}
+
+/** 允许的等级（渲染层按这个配色/筛选；白名单外的一律降级为 info，但会记一行抱怨） */
+const LEVELS = ['info', 'ok', 'reject', 'warn', 'error'];
+
 class LogBus {
   /**
    * @param {{limit?:number, file?:string, fileLimitBytes?:number, levels?:string[]}} [opts]
@@ -57,6 +79,7 @@ class LogBus {
   install() {
     if (this._installed) return this;
     this._installed = true;
+    _guardStdStreams();
     const self = this;
     const wrap = (level, name) => {
       const orig = console[name] ? console[name].bind(console) : console.log.bind(console);
@@ -74,7 +97,18 @@ class LogBus {
 
   /** 追加一行（同时广播 + 落盘） */
   push(level, text) {
-    const line = { seq: ++this.seq, at: Date.now(), level: level || 'info', text: String(text == null ? '' : text) };
+    let lv = level || 'info';
+    if (!LEVELS.includes(lv)) {
+      // 白名单外的等级不静默改成 info：留一行抱怨，否则配色会莫名其妙地"没生效"
+      const bad = lv;
+      lv = 'info';
+      this._warnOnce = this._warnOnce || new Set();
+      if (!this._warnOnce.has(bad)) {
+        this._warnOnce.add(bad);
+        try { console.warn(`[logbus] 未知日志等级「${bad}」，按 info 处理（允许：${LEVELS.join('/')}）`); } catch { /* 忽略 */ }
+      }
+    }
+    const line = { seq: ++this.seq, at: Date.now(), level: lv, text: String(text == null ? '' : text) };
     this.lines.push(line);
     if (this.lines.length > this.limit) this.lines.splice(0, this.lines.length - this.limit);
     for (const cb of this._subs) { try { cb(line); } catch { /* 单个订阅者出错不影响别的 */ } }
