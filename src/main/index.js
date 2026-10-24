@@ -1013,7 +1013,17 @@ app.whenReady().then(async () => {
 
   const port = await server.start();
   engine.serverBase = `http://${config.server.host}:${port}`;
-  config.server.port = port;
+  /* 端口漂移**不许写回配置**。
+     踩过（2026-10-25，用户报"直播姬里两个叠加层卡片不显示了"）：
+     某个会话因为 37821 被占（多半是上次没退干净的实例）绑到了 38000，
+     这里把 38000 写回 config ⇒ 之后每次启动都从 38000 起，
+     而直播姬里那两个浏览器源存的是 37821 的地址 ⇒ 永久空白。
+     现在：配置里的 port 是"意图"，只用来选起始端口；本次实际绑到别处时
+     只记一条警告、不改配置，下次启动仍从用户配的那个端口试。 */
+  if (port !== config.server.port) {
+    console.warn(`[nekofm] 配置端口 ${config.server.port} 被占用，本次临时用 ${port}`
+      + `（不写回配置；直播姬里的浏览器源地址要按本次地址改，详见控制台「设置 / 叠加层」）`);
+  }
   if (!existed) saveConfig(config);
 
   // 内置测试中心：控制台里可以逐组点跑，CLI 也能用同一份清单
