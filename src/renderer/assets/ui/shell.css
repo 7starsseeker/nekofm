@@ -117,6 +117,23 @@ html[data-v2="1"] #lyricStrip { grid-row: 4; }
    列表要的是"一行装得下"，不是"并排两张卡"。 */
 .v2face[data-face="library"] { grid-template-columns: minmax(0, 1fr); }
 
+/* 横跨整行的卡（目前只有「叠加层地址」）：地址很长、两列会挤成省略号，
+   而且它是这个面里最需要一眼看见的东西 —— 用户反馈过它被表单压到折叠线以下。 */
+.v2face > .card.v2-wide { grid-column: 1 / -1; }
+.v2-addr-row { flex-wrap: wrap; align-items: center; gap: 8px; }
+.v2-addr-row .v2-addr-label { flex: 0 0 5.5em; }
+/* 地址在顶栏时代是 `flex:0 1 300px` + `word-break:break-all`（内联样式），
+   300px 装不下 `http://127.0.0.1:37821/overlay?only=lyrics`，会在 `lyr|ics` 处断成两行。
+   这里横跨整行有富余空间，让它吃掉剩余宽度、单行显示，真放不下再省略号。 */
+.v2-addr-row .addr {
+  flex: 1 1 auto !important;
+  min-width: 0;
+  word-break: normal !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* 列表行：一行装不下时**换行**，不许把歌名压没。
    实测依据（1200 窗口，曲库面，`#savedList` 第一行）：11 个行内元素
    （序号 / 歌名 / 缓存徽标 / 歌手 / 来源 / 播放・已缓存・已保存・拉黑・删除 / 匹配方式下拉）

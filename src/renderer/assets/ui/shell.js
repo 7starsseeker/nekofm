@@ -168,47 +168,65 @@
 
     /* -------------------------------------------------- 4) 顶栏瘦身
        两个叠加层地址 + 两个复制 + 合并地址：一周填一次的东西占着顶栏最好的位置，
-       而真正的状态（登录/弹幕/播放/歌词）只有 4 个小 pill。搬到「叠加层」面。 */
+       而真正的状态（登录/弹幕/播放/歌词）只有 4 个小 pill。搬到「叠加层」面。
+       2026-10-25 用户实测反馈：搬过来之后被压在两个大表单卡下面看不见（「叠加层地址
+       也没有了」），而且两个按钮都叫「复制」、第三个叫「合并地址」，分不清哪个是哪个。
+       ⇒ 这张卡改成面里的第一张 + 横跨两列，按钮文案写明各自复制什么。 */
     var addr = document.getElementById('addr');
     var addrInfo = document.getElementById('addrInfo');
     if (addr && addrInfo) {
       var card = document.createElement('div');
-      card.className = 'card';
+      card.className = 'card v2-wide';
       var h2 = document.createElement('h2');
-      h2.textContent = '叠加层地址';
+      h2.textContent = '叠加层地址（两个源各填一个）';
       card.appendChild(h2);
 
-      var mkRow = function (labelText, addrEl, copyId, title) {
+      var mkRow = function (labelText, addrEl, copyId, title, btnText) {
         var row = document.createElement('div');
-        row.className = 'row';
+        row.className = 'row v2-addr-row';
         var lb = document.createElement('span');
-        lb.className = 'tip';
+        lb.className = 'tip v2-addr-label';
         lb.textContent = labelText;
         row.appendChild(lb);
         row.appendChild(addrEl);
         var btn = document.getElementById(copyId);
         if (btn) {
           if (title) btn.title = title;
+          // 旧版面的按钮文案不动（那边是冻结的对照面），只在新外壳里写明复制什么
+          if (btnText) btn.textContent = btnText;
           row.appendChild(btn);
         }
         card.appendChild(row);
       };
-      mkRow('歌词叠加层', addr, 'copyAddr', '复制歌词叠加层地址（填进直播姬的浏览器源）');
-      mkRow('信息卡片', addrInfo, 'copyAddrInfo', '复制信息卡片地址');
+      mkRow('歌词叠加层', addr, 'copyAddr',
+        '复制歌词叠加层地址（填进直播姬的浏览器源 1）', '复制歌词地址');
+      mkRow('信息卡片', addrInfo, 'copyAddrInfo',
+        '复制信息卡片地址（填进直播姬的浏览器源 2）', '复制信息卡地址');
 
       var both = document.getElementById('copyAddrBoth');
       if (both) {
         var rowBoth = document.createElement('div');
-        rowBoth.className = 'row';
+        rowBoth.className = 'row v2-addr-row';
+        var lbBoth = document.createElement('span');
+        lbBoth.className = 'tip v2-addr-label';
+        lbBoth.textContent = '二合一';
+        rowBoth.appendChild(lbBoth);
+        var bothHint = document.createElement('span');
+        bothHint.className = 'tip';
+        bothHint.textContent = '一个源里同时显示歌词 + 信息卡片时才用（两个框要合成一个大框）';
+        rowBoth.appendChild(bothHint);
+        both.textContent = '复制二合一地址';
+        both.title = '复制 /overlay（不带 only 参数）：一个浏览器源同时画歌词和信息卡片';
         rowBoth.appendChild(both);
         card.appendChild(rowBoth);
       }
 
       var note = document.createElement('div');
       note.className = 'tip';
-      note.textContent = '直播姬里建议加两个浏览器源：歌词叠加层的框设成想要的歌词区域（如 1280×200），'
-        + '信息卡片的框贴合卡片（约 320×100）。浏览器源的框就是页面尺寸 —— 一个源里塞两样东西，'
-        + '框必然比各自都大得多；分开就刚刚好。';
+      note.textContent = '直播姬里加两个浏览器源：源 1 填「歌词叠加层」地址，框设成想要的歌词区域（如 1280×200）；'
+        + '源 2 填「信息卡片」地址，框贴合卡片（约 320×100）。浏览器源的框就是页面尺寸 —— '
+        + '一个源里塞两样东西，框必然比各自都大得多；分开就刚刚好。'
+        + '地址里的端口跟本程序监听端口一致，换机器/换端口后这里会跟着变，重新复制一次即可。';
       var d = document.createElement('details');
       d.className = 'v2-notes';
       var s = document.createElement('summary');
@@ -217,7 +235,8 @@
       d.appendChild(note);
       card.appendChild(d);
 
-      faceEls.overlay.appendChild(card);
+      // 第一张卡：进来就看得见（别让它再被表单挤到折叠线以下）
+      faceEls.overlay.insertBefore(card, faceEls.overlay.firstChild);
     }
 
     /* 顶栏里指向地址的那两个标签，地址搬走后就没有指向了 */
