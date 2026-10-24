@@ -693,39 +693,38 @@
    */
   on('btnMyPl', 'click', async () => {
     const box = $('plList');
-    box.innerHTML = '<div class="tip">读取中…</div>';
+    // 「读取中…」与失败/空态都用 lit 画，这样和列表本体是同一套渲染（段 2b）
+    const paint = (rows, placeholder) => {
+      if (!canLit()) return;
+      const { html, render } = window.__nekofmLit;
+      render(html`${placeholder
+        ? html`<div class="tip">${placeholder}</div>`
+        : rows.map((p) => html`<div>
+            <span>${p.name}</span> <span class="tip">${p.trackCount} 首</span>
+            <button title=${`把《${p.name}》整张加入「已保存播放列表」（取全量，不打断点歌）`}
+              @click=${async () => {
+                const rr = await api({ action: 'playlistImport', input: String(p.id), limit: 0, toSaved: true });
+                const d2 = rr.result || {};
+                if (d2.ok) {
+                  log('info', `《${(d2.playlist || {}).name || p.name}》已加入已保存播放列表 ${d2.savedAdded} 首`
+                    + (d2.savedDup ? `（跳过重复 ${d2.savedDup} 首）` : '') + (d2.truncated ? '　⚠️ 网易云没给全' : ''));
+                  refreshSavedList();
+                } else log('error', d2.msg || '加入失败');
+              }}>加入已保存</button>
+            <button title=${`把《${p.name}》整张排进当前播放列表（取全量）`}
+              @click=${async () => {
+                const rr = await api({ action: 'playlistImport', input: String(p.id), limit: 0, autoQueue: true, toSaved: false });
+                const d2 = rr.result || {};
+                if (d2.ok) log('info', `《${(d2.playlist || {}).name || p.name}》已排进当前队列 ${d2.queued} 首${d2.truncated ? '　⚠️ 网易云没给全' : ''}`);
+                else log('error', d2.msg || '入队失败');
+              }}>排进队列</button>
+          </div>`)}`, box);
+    };
+    paint([], '读取中…');
     const r = await api({ action: 'neteaseMyPlaylists' });
     const list = (r.result && r.result.playlists) || [];
-    box.innerHTML = '';
-    if (!list.length) { box.innerHTML = '<div class="tip">没有歌单（需先登录网易云）</div>'; return; }
-    list.slice(0, 50).forEach((p) => {
-      const d = document.createElement('div');
-      d.innerHTML = `<span>${escapeHtml(p.name)}</span> <span class="tip">${p.trackCount} 首</span> `;
-      const add = document.createElement('button');
-      add.textContent = '加入已保存';
-      add.title = `把《${p.name}》整张加入「已保存播放列表」（取全量，不打断点歌）`;
-      add.onclick = async () => {
-        const rr = await api({ action: 'playlistImport', input: String(p.id), limit: 0, toSaved: true });
-        const d2 = rr.result || {};
-        if (d2.ok) {
-          log('info', `《${(d2.playlist || {}).name || p.name}》已加入已保存播放列表 ${d2.savedAdded} 首` +
-            (d2.savedDup ? `（跳过重复 ${d2.savedDup} 首）` : '') + (d2.truncated ? '　⚠️ 网易云没给全' : ''));
-          refreshSavedList();
-        } else log('error', d2.msg || '加入失败');
-      };
-      const q = document.createElement('button');
-      q.textContent = '排进队列';
-      q.title = `把《${p.name}》整张排进当前播放列表（取全量）`;
-      q.onclick = async () => {
-        const rr = await api({ action: 'playlistImport', input: String(p.id), limit: 0, autoQueue: true, toSaved: false });
-        const d2 = rr.result || {};
-        if (d2.ok) log('info', `《${(d2.playlist || {}).name || p.name}》已排进当前队列 ${d2.queued} 首${d2.truncated ? '　⚠️ 网易云没给全' : ''}`);
-        else log('error', d2.msg || '入队失败');
-      };
-      d.appendChild(add);
-      d.appendChild(q);
-      box.appendChild(d);
-    });
+    if (!list.length) { paint([], '没有歌单（需先登录网易云）'); return; }
+    paint(list.slice(0, 50), null);
   });
 
   on('btnConnRoom', 'click', async () => {
@@ -862,30 +861,27 @@
    * **内容没变就不重建 DOM**（2026-09-26 修）：这个函数在 10Hz 的状态广播里被调用，
    * 旧版每次都 `innerHTML=''` 整块重建 —— 白耗主线程，而且按钮在
    * mousedown/mouseup 之间被换成新节点会导致 click 丢失（和队列列表同一类坑）。
+   *
+   * 2026-10-25（段 2b）：改成 lit patch 之后，那条 `dataset.sig` 签名缓存可以扔了 ——
+   * lit 自己就是最小 diff，本来就不会动没变的节点。所以这里只保留 `canLit()` 闸门。
    */
   function renderImported(list) {
     const box = $('importedList');
-    const sig = (list || []).map((p) => `${p.id}:${p.name}:${p.trackCount}`).join('|');
-    if (box.dataset.sig === sig) return;
-    box.dataset.sig = sig;
-    box.innerHTML = '';
-    if (!list || !list.length) { box.innerHTML = '<div class="tip">还没有导入过歌单</div>'; return; }
-    list.slice().reverse().forEach((p) => {
-      const d = document.createElement('div');
-      d.innerHTML = `<span>${escapeHtml(p.name)}</span> <span class="tip">${p.trackCount} 首 · id ${p.id}</span> `;
-      const q = document.createElement('button');
-      q.textContent = '入队';
-      q.onclick = async () => {
-        const r = await api({ action: 'playlistQueue', id: p.id, filterBlacklist: true });
-        const res = r.result || {};
-        if (res.ok) log('info', `《${res.name}》入队 ${res.queued}/${res.total} 首${res.blockedCount ? `（拦下 ${res.blockedCount}）` : ''}`);
-      };
-      const del = document.createElement('button');
-      del.textContent = '移除';
-      del.onclick = () => api({ action: 'playlistRemove', id: p.id });
-      d.appendChild(q); d.appendChild(del);
-      box.appendChild(d);
-    });
+    if (!box) return;
+    if (!canLit()) return;                       // lit 还没到：这一帧不画，ready 后补
+    const { html, render } = window.__nekofmLit;
+    const rows = (list || []).slice().reverse();
+    render(html`${rows.length === 0
+      ? html`<div class="tip">还没有导入过歌单</div>`
+      : rows.map((p) => html`<div>
+          <span>${p.name}</span> <span class="tip">${p.trackCount} 首 · id ${p.id}</span>
+          <button @click=${async () => {
+            const r = await api({ action: 'playlistQueue', id: p.id, filterBlacklist: true });
+            const res = r.result || {};
+            if (res.ok) log('info', `《${res.name}》入队 ${res.queued}/${res.total} 首${res.blockedCount ? `（拦下 ${res.blockedCount}）` : ''}`);
+          }}>入队</button>
+          <button @click=${() => api({ action: 'playlistRemove', id: p.id })}>移除</button>
+        </div>`)}`, box);
   }
 
   /**
@@ -1198,6 +1194,9 @@
   onLitReady(paintBlacklist);
   /* 歌词禁令列表同理：首帧若早于 lit 加载，这里补画一次 */
   onLitReady(() => { if (state) renderLyricBan(state.lyric, state.lyricBan); });
+  /* 已导入歌单列表 / 本地搜索结果同理（首帧若早于 lit 加载，这里补画一次） */
+  onLitReady(() => { if (state) renderImported(state.playlists); });
+  onLitReady(() => { if (lastLocalRes !== undefined) renderLocalList(lastLocalRes); });
 
   /** 用 lit 把缓存列表 patch 到 DOM（不再整块 innerHTML 重建）。 */
   function paintCacheList() {
@@ -1351,41 +1350,39 @@
     return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
   };
 
+  /* 最近一次 renderLocalList 的入参：lit 迟到时要靠它补画一次。
+     用 var 而不是 let —— onLitReady 的注册可能比这里的声明更早执行，
+     let 会在"lit 已就绪、回调立刻同步跑"的情况下撞 TDZ（2026-10-25 踩过同一类坑）。 */
+  var lastLocalRes;
+
   function renderLocalList(res) {
+    lastLocalRes = res;
     const ul = $('localList');
-    ul.innerHTML = '';
-    const tracks = (res && res.tracks) || [];
     $('localStat').textContent = res
       ? `曲库 ${res.libraryTotal} 首${res.adhoc ? `（含 ${res.adhoc} 个临时打开）` : ''}${res.total !== res.libraryTotal ? `，匹配 ${res.total} 首` : ''}`
       : '';
-    if (!tracks.length) {
-      const li = document.createElement('li');
-      li.innerHTML = '<span class="tip">曲库为空。点「打开音乐文件夹…」加入目录，或「打开音乐文件…」直接放一首。</span>';
-      ul.appendChild(li);
-      return;
-    }
-    tracks.slice(0, 200).forEach((t) => {
-      const li = document.createElement('li');
-      const tag = t.adhoc ? '<span class="by">临时</span>' : '';
-      li.innerHTML = `<span class="nm" title="${escapeHtml(t.file)}">${escapeHtml(t.name)}</span>`
-        + `<span class="by">${escapeHtml(t.artistText || '')}</span>${tag}`
-        + `<span class="by">${fmtDur(t.duration)}</span>`;
-      const play = document.createElement('button');
-      play.textContent = '播放';
-      play.onclick = async () => {
-        const r = await api({ action: 'localQueue', file: t.file, urgent: true });
-        if (r.ok) log('info', `已排入并播放：${t.name}`);
-      };
-      const queue = document.createElement('button');
-      queue.textContent = '入队';
-      queue.onclick = async () => {
-        const r = await api({ action: 'localQueue', file: t.file });
-        if (r.ok) log('info', `已入队：${t.name}`);
-      };
-      li.appendChild(play);
-      li.appendChild(queue);
-      ul.appendChild(li);
-    });
+    const tracks = (res && res.tracks) || [];
+    /* 2026-10-25（段 2b）：改 lit patch。这里没有状态广播压力（只在搜索/刷新时重画），
+       但列要用和别处一样的结构，所以一起换掉，顺便不再手写 escapeHtml。 */
+    if (!canLit()) return;                       // lit 还没到：这一帧不画
+    const { html, render, nothing } = window.__nekofmLit;
+    const rows = tracks.slice(0, 200);
+    render(html`${!rows.length
+      ? html`<li><span class="tip">曲库为空。点「打开音乐文件夹…」加入目录，或「打开音乐文件…」直接放一首。</span></li>`
+      : rows.map((t) => html`<li>
+          <span class="nm" title=${t.file}>${t.name}</span>
+          <span class="by">${t.artistText || ''}</span>
+          ${t.adhoc ? html`<span class="by">临时</span>` : nothing}
+          <span class="by">${fmtDur(t.duration)}</span>
+          <button @click=${async () => {
+            const r = await api({ action: 'localQueue', file: t.file, urgent: true });
+            if (r.ok) log('info', `已排入并播放：${t.name}`);
+          }}>播放</button>
+          <button @click=${async () => {
+            const r = await api({ action: 'localQueue', file: t.file });
+            if (r.ok) log('info', `已入队：${t.name}`);
+          }}>入队</button>
+        </li>`)}`, ul);
   }
 
   async function loadLocal(keyword = '') {
