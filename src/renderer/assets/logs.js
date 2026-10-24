@@ -61,6 +61,7 @@
     lyrics: '#9fe8a8',
     player: '#ffd98a',
     local: '#a0d8b0',
+    node: '#6b7684',   // Node/Electron 运行时自己的弃用警告：刻意压暗，它不该抢注意力
   };
   function catColor(name) {
     if (!name) return '';

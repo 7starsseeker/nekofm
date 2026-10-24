@@ -50,6 +50,23 @@ function _guardStdStreams() {
   }
 }
 
+/**
+ * Node / Electron **运行时自己**发出的弃用、实验性警告 —— 不是本程序出的事。
+ *
+ * 踩过：打包版启动时 Node 会往 stderr 打
+ *   `(node:2852) [DEP0180] DeprecationWarning: fs.Stats constructor is deprecated.`
+ *   `(Use `NekoFM --trace-deprecation ...` to show where the warning was created)`
+ * 而打包版（GUI 子系统，没有控制台）会把 stderr 折进主进程的 console.error，
+ * 于是被日志总线当成 error 收进来 —— 用户在工作台上看到一行红字，看起来像程序坏了，
+ * 实际上跟 NekoFM 一点关系都没有（是 asar 加载路径里 Electron 内部构造 fs.Stats）。
+ * 处理：降成 info + 归到 `node` 分类（灰色），保留痕迹但不吓人。
+ */
+function isRuntimeNoise(text) {
+  return /^\(node:\d+\)\s*\[(?:DEP|Experimental|Warning)/.test(text) ||
+    /^\(Use `[^`]+ --trace-deprecation/.test(text) ||
+    /^(?:\(node:\d+\)\s*)?(?:Deprecation|Experimental)Warning:/.test(text);
+}
+
 /** 允许的等级（渲染层按这个配色/筛选；白名单外的一律降级为 info，但会记一行抱怨） */
 const LEVELS = ['info', 'ok', 'reject', 'warn', 'error'];
 
@@ -110,7 +127,12 @@ class LogBus {
 
   /** 追加一行（同时广播 + 落盘） */
   push(level, text) {
+    // 一行一条是总线与窗口的硬约定（列表一行一个事件、文件一行一条）。
+    // Node 的警告本身带换行（第二行是 "(Use `...` ...)"），不拍平就会把一个事件撑成两行。
+    const raw = String(text == null ? '' : text).replace(/\r?\n/g, ' ⏎ ');
     let lv = level || 'info';
+    let category = splitCategory(raw);
+    if (isRuntimeNoise(raw)) { lv = 'info'; category = 'node'; }   // 见 isRuntimeNoise 的注释
     if (!LEVELS.includes(lv)) {
       // 白名单外的等级不静默改成 info：留一行抱怨，否则配色会莫名其妙地"没生效"
       const bad = lv;
@@ -121,12 +143,11 @@ class LogBus {
         try { console.warn(`[logbus] 未知日志等级「${bad}」，按 info 处理（允许：${LEVELS.join('/')}）`); } catch { /* 忽略 */ }
       }
     }
-    const raw = String(text == null ? '' : text);
     const line = {
       seq: ++this.seq,
       at: Date.now(),
       level: lv,
-      category: splitCategory(raw),   // `[engine]` → 'engine'，渲染层用它上色/筛选
+      category,                        // `[engine]` → 'engine'，渲染层用它上色/筛选
       text: raw,
     };
     this.lines.push(line);
