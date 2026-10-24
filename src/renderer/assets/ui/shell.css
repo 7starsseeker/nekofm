@@ -111,6 +111,38 @@ html[data-v2="1"] #lyricStrip { grid-row: 4; }
 .v2face[data-face="settings"] { grid-template-columns: minmax(0, 1fr); }
 .v2face[data-face="settings"] > .card { max-width: 720px; }
 
+/* 曲库面也是单列：这些卡片里是**带逐行按钮的列表**，两列时每行只有 330px，
+   实测行内元素（序号 / 歌名 / 缓存徽标 / 歌手 / 来源 / 4 个按钮）加起来超过容器宽度，
+   于是 `flex-shrink` 把歌名 `.nm` 压成 **0px 宽**、按钮折成 3 行（行高 92px）。
+   列表要的是"一行装得下"，不是"并排两张卡"。 */
+.v2face[data-face="library"] { grid-template-columns: minmax(0, 1fr); }
+
+/* 列表行：一行装不下时**换行**，不许把歌名压没。
+   实测依据（1200 窗口，曲库面，`#savedList` 第一行）：11 个行内元素
+   （序号 / 歌名 / 缓存徽标 / 歌手 / 来源 / 播放・已缓存・已保存・拉黑・删除 / 匹配方式下拉）
+   加起来 ≥642px，而 li 是 `flex-wrap: nowrap` + 歌名 `flex:1 1 0%` ——
+   结果歌名被压到 0px（宽度为 0，根本看不见），按钮里的字自己折成两行（行高 42px）。
+   给歌名一个真实的下限（12em 基准），其余元素就换到第二行去，各字都不再断。 */
+html[data-v2] .v2face li { flex-wrap: wrap; }
+html[data-v2] .v2face li .nm { flex: 1 1 12em; min-width: 8em; }
+html[data-v2] .v2face li > button,
+html[data-v2] .v2face li > select { white-space: nowrap; }
+
+/* 曲库面：把队列栏让给列表。
+   实测（1200 窗口）一条「已保存播放列表」行有 11 个行内元素，一行要 ~780px 才不折；
+   留 344px 给队列栏后列表只剩 642px —— 歌名被 flex 压成 0 宽（用户报的"歌名不显示"）。
+   整理曲库时队列栏没有用（要看队列回直播台），所以这个面收成两列。 */
+#v2wrap[data-face="library"] { grid-template-columns: 156px minmax(0, 1fr); }
+#v2wrap[data-face="library"] #v2rail { display: none; }
+
+/* 列表卡统一内滚：一条 190 首的歌单不该把整张卡撑到 590px 高，
+   也不该把整面推到三屏以外。
+   `#cacheList` 不在名单里 —— 它在 control.html:582 自带 `style="max-height:420px;overflow:auto"`，
+   内联样式优先级高于本文件，硬压要上 !important，不如让它按作者的原意停在自己那一档。 */
+html[data-v2] .v2face #savedList,
+html[data-v2] .v2face #histList,
+html[data-v2] .v2face #localList { max-height: 340px; overflow: auto; }
+
 /* ------------------------------------------------------------ 队列常驻栏 */
 #v2rail {
   overflow: auto;

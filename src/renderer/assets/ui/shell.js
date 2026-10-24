@@ -255,6 +255,11 @@
       Array.prototype.forEach.call(nav.querySelectorAll('.v2-nav-btn'), function (b) {
         b.classList.toggle('active', b.dataset.face === key);
       });
+      /* 曲库面的行是"11 个元素挤一行"（序号/歌名/缓存徽标/歌手/来源/5 个按钮/下拉），
+         实测一行要 ~780px 才不折。队列栏占掉 344px 后只剩 642px，歌名会被压成 0 宽。
+         整理曲库时队列栏本来也没用（要看队列回直播台，或看底部播放条），
+         所以曲库面把右栏让给列表。 */
+      wrap.dataset.face = key;
       mainEl.scrollTop = 0;
       try { localStorage.setItem('nekofm.face', key); } catch (e) { /* 忽略 */ }
     }
