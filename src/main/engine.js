@@ -432,8 +432,9 @@ class Engine extends EventEmitter {
         this.roomLiveStatus = info.liveStatus == null ? null : info.liveStatus;
         if (info.liveStatus != null && info.liveStatus !== 1) {
           const what = info.liveStatus === 2 ? '正在轮播' : '未开播';
-          this.notify('warn', `房间 ${info.roomId} ${what}：开放平台长连已建立，但 B站此刻不会推送弹幕；`
-            + `开播后自动生效`);
+          this.notify('warn', `房间 ${info.roomId} ${what}：开放平台长连已建立。`
+            + `B站的官方通道只在开播时投递弹幕，所以现在多半收不到；`
+            + `如果确实收到了，下面的计数会涨（收到即生效，这条提示只是提醒）`);
         }
         this.emit('change');
       });
@@ -488,8 +489,9 @@ class Engine extends EventEmitter {
       }
       if (info.liveStatus !== 1) {
         const what = info.liveStatus === 2 ? '正在轮播' : '未开播';
-        this.notify('warn', `房间 ${info.roomId} ${what}：弹幕服务已连上，但 B站此刻不会推送弹幕；`
-          + `现在发点歌不会触发，开播后自动生效（想先测点歌用控制台的点歌框）`);
+        this.notify('warn', `房间 ${info.roomId} ${what}：弹幕服务已连上。`
+          + `B站对未开播房间经常不投递弹幕（也可能是没人发），收到一条就会记在「弹幕」计数里 —— `
+          + `收到即生效，这条只是提醒，不是闸门`);
       }
       this.emit('change');
     });
@@ -630,7 +632,21 @@ class Engine extends EventEmitter {
      * 例外：控制台「注入弹幕」的测试弹幕（`injected: true`）——
      * 它本来就是用来验证指令链路的，不该被直播状态挡住。
      */
-    if (!this.streaming && !d.injected) return;
+    if (!this.streaming && !d.injected) {
+      /**
+       * **不静默丢弃**（2026-10-25 用户实测反馈：「未开播时发弹幕，不知道收到没有」）。
+       *
+       * 以前这里直接 return —— 弹幕收到了、什么都不发生、日志里一个字都没有，
+       * 用户只能怀疑"是不是根本没连上/根本没收到"。
+       *
+       * **只记日志，不产生 notice**：`test/player.test.js` 里有一条断言
+       * 「未直播：弹幕指令不执行（连回执都不产生）」—— 回执（notice）会显示到叠加层上
+       * 给观众看，那属于"检查标准"，要改得单独批准。日志只进「运行日志」窗口，
+       * 正好是主播排障时看的地方，也不会吵到观众。
+       */
+      this.log(`[engine] 未直播，已忽略弹幕：${String(d && d.text || '').slice(0, 80)}`);
+      return;
+    }
     const isAnchor = this._isAnchorUser(d);
     /**
      * 前几条弹幕把"是谁发的"写进日志。
