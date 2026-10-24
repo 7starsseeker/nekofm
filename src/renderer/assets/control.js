@@ -1986,90 +1986,22 @@
   on('btnCachePrefetchSaved', 'click', () => prefetch('saved', '已保存播放列表'));
   on('btnCachePrefetchHist', 'click', () => prefetch('history', '已播放'));
 
-  // ------------------------------------------------------------------ 测试中心
-  let tcGroups = [];
-
-  const tcMark = (ok) => (ok === true ? '✅' : ok === null ? '⏭️' : '❌');
-
-  function renderTcResults(res) {
-    const box = $('tcResults');
-    box.innerHTML = '';
-    if (!res || !res.results) return;
-    let lastGroup = null;
-    res.results.forEach((r) => {
-      if (r.groupName !== lastGroup) {
-        lastGroup = r.groupName;
-        const h = document.createElement('div');
-        h.innerHTML = `<b>${escapeHtml(r.groupName)}</b>`;
-        h.style.marginTop = '6px';
-        box.appendChild(h);
-      }
-      const d = document.createElement('div');
-      d.className = r.ok === false ? 'error' : (r.ok === null ? 'info' : '');
-      d.textContent = `${tcMark(r.ok)} ${r.name}${r.detail ? ' → ' + r.detail : ''}${r.ms ? ` (${r.ms}ms)` : ''}`;
-      box.appendChild(d);
-    });
-    $('tcSummary').textContent = `通过 ${res.passed} / 失败 ${res.failed} / 跳过 ${res.skipped}（共 ${res.total}，${res.ms}ms）`;
+  // ------------------------------------------------ 测试中心 / 演练·注入（已搬到模块）
+  /*
+   * 段 2 第一刀：这两张卡的代码已经搬进 `/assets/ui/face-ops.js`。
+   * 「面」模块的契约写在那个文件头上：模块只往 `window.__nekofmFaces` 挂 `init(ctx)`，
+   * ctx 由这里注入（$ / api / log / on / esc），模块不碰宿主的其它内部变量。
+   *
+   * 为什么先搬这一块：它是五个面里**最不缠数据流**的一段（只发指令、画结果），
+   * 适合先把契约跑通再动别的。缺少模块时**必须响亮报错**——静默少一块功能
+   * 正是这次改造要消灭的那类问题。
+   */
+  const opsFace = (window.__nekofmFaces && typeof window.__nekofmFaces.ops === 'function')
+    ? window.__nekofmFaces.ops({ $, api, log, on, esc: escapeHtml })
+    : null;
+  if (!opsFace) {
+    log('error', '/assets/ui/face-ops.js 没加载 —— 测试中心与演练/注入按钮会没反应');
   }
-
-  async function runTests(groups) {
-    const includeNetwork = $('tcNet').checked;
-    $('tcSummary').textContent = '运行中…';
-    log('info', `开始自检${includeNetwork ? '（含联网项）' : ''}…`);
-    const r = await api({ action: 'runTests', groups: groups || null, includeNetwork });
-    const res = r.result;
-    if (!res) { log('error', '自检未返回结果'); return; }
-    renderTcResults(res);
-    log(res.failed ? 'error' : 'info', `自检完成：通过 ${res.passed} / 失败 ${res.failed} / 跳过 ${res.skipped}`);
-  }
-
-  on('tcRunAll', 'click', () => runTests(null));
-
-  async function loadTestGroups() {
-    const r = await api({ action: 'testList' });
-    tcGroups = (r.result && r.result.groups) || [];
-    const box = $('tcGroups');
-    box.innerHTML = '';
-    tcGroups.forEach((g) => {
-      const b = document.createElement('button');
-      const netOnly = g.checks.every((c) => c.net);
-      b.textContent = `${g.name}（${g.checks.length}）${netOnly ? '·需联网' : ''}`;
-      b.title = g.desc || '';
-      b.onclick = () => runTests([g.id]);
-      box.appendChild(b);
-    });
-  }
-
-  // ------------------------------------------------------------------ 演练 / 注入
-  let demoTimer = null;
-  on('btnDemoStart', 'click', async () => {
-    const r = await api({ action: 'demoStart', seconds: 120 });
-    const res = r.result || {};
-    if (res.ok) {
-      $('demoStat').textContent = `演示中（${res.seconds}s，${res.lines} 行歌词）`;
-      log('info', '演示模式已开启 —— 叠加层现在应显示歌词与信息栏');
-      clearInterval(demoTimer);
-      demoTimer = setInterval(async () => {
-        const s = await api({ action: 'demoStatus' });
-        if (!(s.result && s.result.running)) { clearInterval(demoTimer); $('demoStat').textContent = '已结束'; }
-      }, 3000);
-    } else log('error', '演示启动失败：' + (res.msg || ''));
-  });
-  on('btnDemoStop', 'click', async () => {
-    await api({ action: 'demoStop' });
-    clearInterval(demoTimer);
-    $('demoStat').textContent = '已结束';
-  });
-  on('btnInject', 'click', async () => {
-    const text = $('injText').value.trim();
-    if (!text) return;
-    const r = await api({ action: 'injectDanmaku', text, uname: '测试观众', isAdmin: $('injAdmin').checked });
-    const res = r.result || {};
-    if (res.ok) log('info', '已注入弹幕：' + text + (res.notices && res.notices[0] ? ' → ' + res.notices[0] : ''));
-    else log('error', '注入失败：' + (res.msg || ''));
-    $('injText').value = '';
-  });
-  on('injText', 'keydown', (e) => { if (e.key === 'Enter') $('btnInject').click(); });
 
   // ------------------------------------------------------------------ 本地音乐
   const fmtDur = (s) => {
@@ -2448,7 +2380,7 @@
     connect();
     checkNeteaseStatus(true).catch(() => {});   // 启动就核验一次，别让用户猜
     refreshDevices();
-    loadTestGroups();
+    if (opsFace && opsFace.loadTestGroups) opsFace.loadTestGroups();   // 在 face-ops.js 里
     loadLocal();
     refreshCacheList();
     initLyricStrip();   // 底部歌词条（开着的话立即开始跟帧）

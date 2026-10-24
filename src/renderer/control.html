@@ -917,6 +917,9 @@
 <script src="/shared/lyric-sync.js"></script>
 <!-- 竖刻度音量控件：控制台与播放核心窗共用同一份实现（每格 2%、面板开合、动态音量开关） -->
 <script src="/shared/volume-dial.js"></script>
+<!-- 「面」模块：必须在 control.js 之前 —— control.js 启动时会调它们的 init(ctx)。
+     契约见 face-ops.js 文件头；缺任何一个，control.js 会往运行日志里报错而不是静默少功能。 -->
+<script src="/assets/ui/face-ops.js"></script>
 <script src="/assets/control.js"></script>
 <!-- 新版外壳：必须排在 control.js 之后（要等它把卡片搬进页签后再重新分堆） -->
 <script src="/assets/ui/shell.js"></script>
