@@ -63,13 +63,16 @@
     border-radius: 4px; font-size: 11px; text-align: center; opacity: .95;
   }
   #lines li .cat { color: #647687; margin-right: 8px; font-size: 11px; }
-  #lines li.ok { color: #9ff0c4; }
+  /* 级别色条：即使整屏都是 info 灰字，左边这一竖条也能让人一眼分出"这行是不是事"。
+     背景底色同步淡染，扫一眼就能看出哪几行要读。 */
+  #lines li { border-left: 2px solid transparent; padding-left: 10px; }
+  #lines li.ok { color: #9ff0c4; border-left-color: #4ade80; background: rgba(74, 222, 128, .055); }
   #lines li.ok .lv { background: rgba(74, 222, 128, .14); color: #9ff0c4; }
-  #lines li.reject { color: #e6cf9a; }
+  #lines li.reject { color: #e6cf9a; border-left-color: #e6cf9a; background: rgba(230, 207, 154, .055); }
   #lines li.reject .lv { background: rgba(230, 207, 154, .12); color: #e6cf9a; }
-  #lines li.warn { color: #ffd98a; }
+  #lines li.warn { color: #ffd98a; border-left-color: #fbbf24; background: rgba(251, 191, 36, .06); }
   #lines li.warn .lv { background: rgba(251, 191, 36, .16); color: #ffd98a; }
-  #lines li.error { color: #ff9db0; background: rgba(120, 24, 32, .18); }
+  #lines li.error { color: #ff9db0; border-left-color: #f87171; background: rgba(120, 24, 32, .18); }
   #lines li.error .lv { background: rgba(248, 113, 113, .2); color: #ffb3c0; }
   #lines li.hit { background: rgba(126, 231, 255, .12); }
   #lines li.hit .t { color: #7ee7ff; }

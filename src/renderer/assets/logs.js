@@ -46,6 +46,31 @@
     return text.replace(new RegExp('^\\[' + cat.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\]\\s*'), '');
   }
 
+  /**
+   * 分类配色：常见分类给固定色，未知分类用字符串哈希在色环上取一个稳定色。
+   * 目的不是好看，是**让整屏 info 也有结构** —— 启动那一屏全是 [cache]/[server]/
+   * [open-live]，没有级别差异，如果分类也不区分，看起来就"一种颜色到底"。
+   */
+  const CAT_COLORS = {
+    engine: '#7ee7ff',
+    server: '#8fb7ff',
+    cache: '#b39dff',
+    'open-live': '#ff9ad5',
+    netease: '#ffb37a',
+    bili: '#7ad7ff',
+    lyrics: '#9fe8a8',
+    player: '#ffd98a',
+    local: '#a0d8b0',
+  };
+  function catColor(name) {
+    if (!name) return '';
+    const fixed = CAT_COLORS[name];
+    if (fixed) return fixed;
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+    return 'hsl(' + h + ', 62%, 74%)';
+  }
+
   function match(level, text) {
     if (errOnly && !LV_PROBLEM[level]) return false;
     if (filter && !text.toLowerCase().includes(filter)) return false;
@@ -78,6 +103,7 @@
       const cat = document.createElement('span');
       cat.className = 'cat';
       cat.textContent = '[' + line.category + ']';
+      cat.style.color = catColor(line.category);
       li.appendChild(cat);
     }
     li.appendChild(document.createTextNode(body));
