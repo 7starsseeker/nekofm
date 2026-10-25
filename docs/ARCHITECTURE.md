@@ -35,8 +35,10 @@
 
 ```
 src/
-  shared/
-    lyric-sync.js        主进程与渲染层共用的歌词定位（findLine / 插值）
+  shared/                ★ 主进程与渲染层共用（同一份实现，两边行为天然一致）
+    lyric-sync.js        歌词定位（findLine / 插值）
+    auto-gain.js         动态音量的决策数学（只算"这次增益定多少"，不出声）
+    volume-dial.js       竖刻度音量控件（控制台底栏与播放核心窗共用）
 
   core/                  ★ 纯 Node，不依赖 Electron —— 可单测、可 headless
     config.js            DEFAULT_CONFIG + dataRoot()/configPath()（决定数据放哪）
@@ -44,6 +46,8 @@ src/
     blacklist.js         黑名单（song / keyword / artist / bvid 四种粒度）
     commands.js          弹幕文本 → 指令对象（纯函数，词表来自 config.commands）
     demo.js              演练模式素材（假曲目 + 假歌词时间轴）
+    text-file.js         编码探测读取（歌词/名单文件可能是 GBK）
+    overlay-window.js    叠加层窗口几何（拉边改大小的纯函数，有单测）
     lyrics/lrc.js        LRC / 增强型 LRC / 网易云 yrc → 统一 timeline
     netease/
       client.js          网易云客户端（**限流熔断与退避在这里**）
@@ -51,6 +55,7 @@ src/
     bilibili/
       wbi.js             WBI 签名（签名后免登录拿弹幕 token）
       danmaku.js         Node 直连弹幕通道（最后的降级，B站风控基本会拒）
+      mini-ws.js         极简 WebSocket 客户端（直连通道用，不引依赖）
       open-live.js       官方直播开放平台长连（有凭证时最稳）
       browser-channel.js 系统 Edge/Chrome + CDP 弹幕通道
       browser.js         B站登录窗（只为取 cookie，不拿它发 API）
@@ -61,20 +66,70 @@ src/
     engine.js            ★ 播放引擎 —— 最大文件，核心逻辑都在这
     cache.js             MediaCache：音频 + 歌词 + 封面缓存 + 集中索引
     commands.js          /api/command 的指令分发（HTTP → Engine）
+    logbus.js            运行日志总线（五级 + 分类 + 环形缓冲 + 落盘）
     server.js            本地 HTTP + SSE 服务、/stream/* 代理
-    selftest.js          测试中心（88 项检查：离线 68 / 联网 20）
+    selftest.js          测试中心（检查项数量见下方「测试分层」）
     sources/
       local.js           本地曲库（递归扫描 / ffprobe 元数据 / 旁车歌词 / 白名单）
       netease-browser.js 借 Electron 登录态会话取直链（"浏览器急兑"）
 
   renderer/              ★ 全是普通网页，不依赖打包器
-    control.html         控制台（分页 + 底部固定播放器）
+    control.html         控制台：**/console 新外壳与 / 旧版面共用这一份 DOM**
     overlay.html         直播姬用的透明歌词叠加层
     player.html          隐藏窗口里的 <audio> 本体
-    assets/*.js|css      对应界面的脚本与样式
+    logs.html            运行日志 / 状态窗口（独立窗口，不进主控制台）
+    assets/*.js|css      对应界面的脚本与样式（control.js 是控制台主逻辑）
+    assets/ui/           控制台「面」模块：shell.js（新外壳）+ face-*.js（五个面）
+                         + lit.js（lit-html 加载器）
+    assets/vendor/       vendored lit-html 3.3.3（BSD-3，同源加载 —— CSP 禁 CDN）
 ```
 
-规模：`src/` 约 15.7k 行 JS，最大单文件 `src/main/engine.js`（3.2k 行）。
+规模：`src/` 约 22.0k 行 JS（41 个文件），最大单文件 `src/main/engine.js`（4.3k 行），
+其次 `src/renderer/assets/control.js`（1.9k 行）。
+
+---
+
+## 控制台有两套版面（`/console` 新外壳 + `/` 旧版面）
+
+0.7.0 起控制台默认打开 `http://127.0.0.1:<port>/console`，而旧的单列版面仍然
+原样保留在 `/`，两份**共用同一份 `control.html` 与同一批 id/事件绑定**：
+
+| 路径 | 谁在管版面 | 用途 |
+|---|---|---|
+| `/console`（默认） | `assets/ui/shell.js` 接管：左侧导航 + 舞台 + 恒在右栏的队列 | 日常使用 |
+| `/` | `assets/control.js` 里的 `layoutShell`：五个页签分页 | 逃生门（新版出问题时仍能改到每一张卡） |
+
+想强制回到旧版面：启动前设环境变量 `NEKOFM_CONTROL_PAGE=/`（`src/main/index.js`
+的 `controlPage`）。两个版面互相都有入口：旧版面播放器栏上的「新界面 →」常驻；
+新版导航底部的「旧版界面」可以在「设置 · 界面」卡里关掉
+（存在浏览器 `localStorage.nekofm.legacyEntry`，**不进配置文件** —— 这是界面偏好，
+不该跟着直播配置走）。
+
+`shell.js` 只做三件事，**不重新实现任何功能**：① 按 h2 标题把 20+ 张卡分到五个面
+（直播台 / 曲库 / 叠加层 / 审核诊断 / 设置，设置钉在导航底部）；② 建「叠加层地址」
+「说明」「界面」这类只在新版才有意义的卡；③ 记住上次所在的面
+（`localStorage.nekofm.face`）。分面表 `FACES` 是**前缀匹配、长的先试**，新增卡片
+必须登记，否则会静默掉进「审核诊断」—— `test/shell-faces.test.js` 就是防这个的回归网。
+
+面的**功能**在 `assets/ui/face-*.js` 里，契约是 `window.__nekofmFaces.<面>(ctx)`
+返回一个对象（`ctx` 带 `$ / api / log / on / esc / toast` 等）：`face-live`（队列 / 点歌 /
+传输 / 直播状态）、`face-library`（已保存 / 已播放 / 本地曲库 / 歌单导入 / 缓存）、
+`face-overlay`（叠加层预览与两个表单）、`face-account`（网易云登录）、
+`face-ops`（自测 / 演练）。**模块没加载时宿主会 `log('error', …)` 响亮报错**，
+而不是让按钮静默失效。
+
+列表的 DOM 用 `lit-html` 的模板 patch（`assets/ui/lit.js` 把 vendored 的 ESM 挂成
+`window.__nekofmLit`）：拿不到就跳过这一帧、等 `nekofm:lit-ready` 事件再重画，
+绝不假设它已经就绪。队列行与「已保存」行的行内操作收进了右键菜单
+（`window.__nekofmCtxMenu`，只有 `location.pathname === '/console'` 启用）——
+这是列宽纪律的一部分：常驻 5 个按钮会在宽列表里吃掉约 380px，在 344px 的队列栏里
+更是把一行挤成三层。
+
+**版本号只有一条来源**：主进程 `APP_VERSION = app.getVersion()`（回落读
+`package.json`，再回落 `'unknown'`），由 `statePayload()` 拼进 `/api/state` 与每次 SSE
+广播（`{ ...engine.state(), version }`）—— **不塞进 `engine.state()`**（Engine 是纯业务层，
+版本是外壳的事），也不在渲染层写死。`tools/headless.js` 用同一个字段名，所以命令行
+和界面看到的版本一致。「关于」卡只是把这个字段显示出来。
 
 ---
 
@@ -186,6 +241,13 @@ Electron 默认写 `%APPDATA%`，本项目在启动时用 `app.setPath('userData
 `engine.serverBase` 指向**另一个进程** → 取流/封面/歌词代理地址全打错端口；
 内置测试中心也拿它发请求（表现成莫名其妙的 403，排查绕了不少路）。
 
+**0.7.0 起：漂移后的端口不写回配置。** 配置里的 `server.port` 是"意图"
+（起始端口），不是"事实"。以前的写法在绑定成功后直接 `config.server.port = port`
+并落盘 —— 只要某次 37821 被别的程序占了一下，你填进直播姬的叠加层地址就被
+**永久改掉**，之后每次开播都是黑屏，而配置里已经看不出原始值。
+现在只在 `port !== config.server.port` 时打一行 warn，让人知道"这次跑在别的端口，
+叠加层地址要跟着改"，配置保持原样。
+
 ### 运行日志总线（`src/main/logbus.js`）
 
 打包成 exe 后**没有控制台**，`console.log` 写进虚无 ——「卡住了 / 点了没反应」
@@ -193,11 +255,26 @@ Electron 默认写 `%APPDATA%`，本项目在启动时用 `app.setPath('userData
 
 - 在 `console` 这一层**收口**（接管 info/warn/error）：原行为不变，只多一份副本。
   全项目几百处 `console.log` 逐个换成 logger 既容易漏、diff 也没法 review；
+- **五级**：`info` / `ok`（做成了）/ `reject`（没做成，且是预期内的拒绝）/ `warn` / `error`。
+  "没执行"与"出错了"必须分开 —— 把「你没权限点这首」染成红色，等于教人忽略红色；
+- **分类**从行首 `[engine]` / `[netease]` 这类前缀里抽（`splitCategory`），
+  日志窗口按分类给固定色，未知分类用哈希取色（同一个分类颜色恒稳定）；
+- `console` 里的**运行时噪音**（`(node:1234) [DEP0180] DeprecationWarning…`）降成
+  `info` + `category: 'node'`，多行警告用 ` ⏎ ` 拍平成一行 —— 否则一条弃用警告
+  能在"只看问题"里堆出二十行红字；
+- 白名单之外的等级名一律降 `info` 并只 warn 一次（防止第三方库把 `debug`/`trace` 塞进来）；
+- **stdout/stderr 的 `'error'` 事件直接吞掉**：管道断开（EPIPE）时 Node 默认把
+  `write after end` 抛成未捕获异常，能**带走整个主进程** —— 日志总线自己不能成为
+  让程序崩掉的原因；
 - 环形缓冲（默认 800 行）+ 落盘 `data/logs.txt`（超 2MB 滚动一代 `.1`）；
 - 经 SSE 推给 `/logs` 页面（**只有 `?logs=1` 的连接收**，不给控制台/叠加层加流量），
   窗口按 `seq` 续传，断线重连不会重刷整屏；
 - 页面顶部同时显示运行状态（播放/队列/弹幕房间与主播/网易云登录与限流/缓存），
   是打包版唯一的"现场"。`--smoke` 里有一项会**真的把它打开并查 DOM**。
+
+引擎内部还有一条**结构化通道** `Engine.logEvent(level, text)`（由 `index.js` 注入，
+落成 `logBus.push(level, '[engine] ' + text)`）：业务层想标"这是拒绝、不是故障"时，
+不必再靠 `console.warn` 的字符串形状去猜。
 
 ### 叠加层会自己跟上新版本
 
@@ -253,6 +330,22 @@ Electron（UA / UA-CH 全套伪装、多个 Chromium 版本都试过）与 Node 
 弹幕客户端，把收到的原始包回主进程解包。**签名算法仍在 Node 侧**，
 只有"发请求"这一步发生在浏览器里。
 
+官方通道（第 1 条）还有三件必须知道的事：
+
+- **`ws.binaryType` 必须显式设成 `'arraybuffer'`。** Electron 升到 43（Node 22）后，
+  底层 WebSocket 换成了全局实现，二进制帧的 `event.data` 默认是 **`Blob`** ——
+  直接丢进解包器只会得到字符串 `"[object Blob]"`：**每一帧都解出 0 个包、而且不报错**，
+  表现就是"连上了、一条弹幕都没有"。代码里另有一条 `raw instanceof Blob →
+  arrayBuffer()` 的兜底，并把 `binaryType` 写死，不依赖运行时默认值。
+- **开播状态要自己轮询，不能只信连接时那一次。** 官方通道建连时如果还没开播，
+  之后主播开播不会自动补推——所以 `_startRoomWatch(roomId)` 在连上 1.5 秒后补查一次、
+  之后每 30 秒 `_pollRoomLive`，用 `_applyLiveStatus(next, source, roomId)` 统一落地
+  （**只在变化时**发 change + 提示；查询失败保留原状态，不误判成未开播；
+  断开或换房间后旧轮询用 token 作废）。
+- **诊断计数是给"收不到弹幕"用的**：`stats.opCounts` / `cmdCounts` / `unknownCmds`
+  把"收到了哪些 op、哪些 CMD"摊开；25 秒没有任何帧会提示"消息类型（DM）未开通"，
+  每 60 秒打一行长连统计。没有这些，长连"活着但没数据"和"根本没连上"分不出来。
+
 详见 [CONFIGURATION.md](CONFIGURATION.md#2-b站bilibili) —— 那里写了两种模式的
 能力边界和开放平台凭证的申请步骤。
 
@@ -262,11 +355,16 @@ Electron（UA / UA-CH 全套伪装、多个 Chromium 版本都试过）与 Node 
 
 | 层 | 入口 | 是否联网 | 说明 |
 |---|---|---|---|
-| 单元 | `npm test` | 否 | 歌词解析 / 队列 / 黑名单 / 本地 / 播放器状态机 |
+| 单元 | `npm test` | 否 | 歌词解析 / 队列 / 黑名单 / 本地 / 播放器状态机 / 封面状态 / **开播轮询（room-watch）** |
 | 端到端 | `npm run test:e2e` | 否（有联网预检） | 点歌 → 取流 → 歌词 → SSE → 代理 → 演练 → 安全 |
-| 测试中心 | `npm run test:center` | 否 | 与界面里「测试中心」同一份清单 |
+| 测试中心 | `npm run test:center` | 否 | 与界面里「测试中心」同一份清单，**共 91 项**（离线 71 / 联网 20） |
 | 联网 | `npm run test:live`、`npm run test:center:net` | 是 | 打真实接口，需要网络与（部分项）登录态 |
-| 冒烟 | `npm run smoke` | 否 | 启动 Electron → 查 DOM → 自动退出 |
+| 冒烟 | `npm run smoke` | 否 | 启动 Electron → 查 DOM（含日志窗口）→ 自动退出 |
+
+另有一条**纯静态**的版面回归网 `test/shell-faces.test.js`（不含在 `npm test` 之外，
+是它的一部分）：解析 `control.html` 的卡片与 `shell.js` 的 `FACES`，断言每张卡都有
+h2、都归到某个面、标题不陈旧、不跨面重复、卡片总数守恒 —— 加一张卡忘记登记面，
+它当场就红（否则那张卡会静默消失在「审核诊断」里）。
 
 **限流不算失败**：网易云会按 IP 限流（`code:405 操作频繁`）。遇到限流时测试中心
 把该项标为「跳过」并写明原因，联网测试整体 SKIP 并退出码 0 ——
