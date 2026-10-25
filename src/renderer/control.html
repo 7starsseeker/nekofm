@@ -820,6 +820,26 @@
     <h2>提示 / 日志</h2>
     <div id="log" class="log"></div>
   </div>
+
+  <!-- 关于（2026-10-25 用户要求：界面上要能直接看到作者、授权、发布地址、版本号） -->
+  <div class="card">
+    <h2>关于</h2>
+    <div class="tip">B站直播用的<b>音乐播放 + 实时歌词</b>系统：弹幕点歌、网易云 / 本地 / B站三种音源、
+      直播姬歌词叠加层。替代闭源收费的点歌机插件，运行时不依赖任何第三方服务端。</div>
+    <div class="row"><label class="lbl">当前版本</label><span id="aboutVer" class="tip">读取中…</span></div>
+    <div class="row"><label class="lbl">作者</label><span class="tip">7starsseeker（NekoFM contributors）</span></div>
+    <div class="row"><label class="lbl">授权</label><span class="tip">Apache License 2.0 —— 可自由使用 / 修改 / 再分发，
+      须保留版权与许可声明。全文见源码里的 <b>LICENSE</b> 与 <b>NOTICE</b>。</span></div>
+    <div class="row"><label class="lbl">发布页</label><code id="aboutReleases">https://github.com/7starsseeker/nekofm/releases</code></div>
+    <div class="row"><label class="lbl">源码</label><code>https://github.com/7starsseeker/nekofm</code></div>
+    <div class="row">
+      <button id="btnAboutReleases">打开发布页（下载新版）</button>
+      <button id="btnAboutRepo">打开源码仓库</button>
+      <button id="btnAboutCopy">复制版本信息</button>
+      <span id="aboutStat" class="tip"></span>
+    </div>
+    <div class="tip">发布页里有更新日志和绿色版压缩包；遇到问题请带上「当前版本」这一行的版本号。</div>
+  </div>
 </aside>
 
 <!--

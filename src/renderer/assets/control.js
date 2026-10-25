@@ -283,6 +283,16 @@
   // ------------------------------------------------------------------ 渲染
   function renderState(s) {
     state = s;
+    /**
+     * 「关于」卡里的版本号。**只从状态里拿**（主进程 `statePayload()` 补的 `version`），
+     * 不在前端写死 —— 写死就一定会和实际跑的版本对不上。
+     * 变化时才写 DOM（状态约 10Hz 刷新，没必要每次都碰）。
+     */
+    const aboutVer = $('aboutVer');
+    if (aboutVer && s.version && aboutVer.dataset.v !== s.version) {
+      aboutVer.dataset.v = s.version;
+      aboutVer.textContent = 'v' + s.version;
+    }
     const pb = s.playback || {};
     // 歌词条插值要用的播放快照：position + serverTime + paused
     // （服务端约 5Hz 报进度，靠 serverTime 在本地外推，60fps 平滑）
@@ -564,6 +574,23 @@
   on('copyAddr', 'click', () => copyText($('addr').textContent, '歌词叠加层地址'));
   on('copyAddrInfo', 'click', () => copyText($('addrInfo').textContent, '信息卡片地址'));
   on('copyAddrBoth', 'click', () => copyText(location.origin + '/overlay', '合并地址'));
+  /**
+   * 「关于」卡（2026-10-25 用户要求）。
+   * 文案（作者 / 授权 / 地址）写在 control.html 里 —— 它们是稳定事实，和 README / NOTICE
+   * 同一份；**版本号不写死**，由状态推送填（见 renderState 顶部）。
+   * 两个链接用系统浏览器打开：Electron 的窗口没有地址栏，在窗口内跳走就回不来了。
+   */
+  const REPO_URL = 'https://github.com/7starsseeker/nekofm';
+  const RELEASES_URL = REPO_URL + '/releases';
+  on('btnAboutReleases', 'click', () => api({ action: 'openExternal', url: RELEASES_URL }));
+  on('btnAboutRepo', 'click', () => api({ action: 'openExternal', url: REPO_URL }));
+  on('btnAboutCopy', 'click', () => copyText([
+    `NekoFM ${state && state.version ? 'v' + state.version : '(版本未知)'}`,
+    '作者：7starsseeker（NekoFM contributors）',
+    '授权：Apache License 2.0',
+    '发布页：' + RELEASES_URL,
+    '源码：' + REPO_URL,
+  ].join('\n'), '版本信息'));
   /**
    * 竖刻度音量控件（2026-10-13 换掉原来的 72px 横条）。
    *

@@ -24,6 +24,12 @@ const { AppServer } = require('../src/main/server');
 const { createCommandHandler } = require('../src/main/commands');
 const { DEFAULT_CONFIG, deepMerge, configPath } = require('../src/core/config');
 
+/**
+ * 版本号：与 Electron 外壳共用同一份事实（package.json）。
+ * 界面「设置 · 关于」卡显示的就是它，headless 模式也要有 —— 否则那边会显示"读取中…"。
+ */
+const APP_VERSION = require('../package.json').version;
+
 const argv = process.argv.slice(2);
 const flag = (name, def = null) => {
   const i = argv.indexOf('--' + name);
@@ -91,7 +97,7 @@ const log = (...a) => {
     host: config.server.host,
     rendererDir: path.join(__dirname, '..', 'src', 'renderer'),
     sharedDir: path.join(__dirname, '..', 'src', 'shared'),
-    getState: () => engine.state(),
+    getState: () => ({ ...engine.state(), version: APP_VERSION }),
     getLyrics: () => engine.lyricsPayload(),
     getConfig: () => engine.config.overlay,
     allowRootsProvider: () => [
@@ -114,7 +120,7 @@ const log = (...a) => {
 
   let lyricRev = -1;
   setInterval(() => {
-    server.broadcast(engine.state());
+    server.broadcast({ ...engine.state(), version: APP_VERSION });
     if (engine.lyricRev !== lyricRev) {
       lyricRev = engine.lyricRev;
       server.broadcast(engine.lyricsPayload());

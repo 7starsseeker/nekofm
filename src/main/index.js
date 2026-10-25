@@ -29,6 +29,19 @@ const { BrowserDanmakuChannel } = require('../core/bilibili/browser-channel');
 const { DEFAULT_CONFIG, deepMerge, configPath } = require('../core/config');
 const { OVERLAY_EDGES, OVERLAY_MIN, nextBounds } = require('../core/overlay-window');
 
+/**
+ * 版本号：**只从 package.json 取一份**，界面（控制台「设置 · 关于」）显示的就是它。
+ *
+ * 为什么不在 HTML 里写死：版本号每发一版都要改，写死就会漏；而界面上写着 0.6.0、
+ * 实际跑的是 0.7.0 时，用户报 bug 会带错版本，排查第一步就走偏。
+ * `app.getVersion()` 读的就是打包进 asar 的 package.json；万一它拿不到（早期启动阶段），
+ * 直接读同一份文件兜底，两个来源仍然是同一个文件。
+ */
+const APP_VERSION = (() => {
+  try { return app.getVersion(); } catch { /* 继续兜底 */ }
+  try { return require('../../package.json').version; } catch { return 'unknown'; }
+})();
+
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
 /**
  * 应用图标：窗口 / 任务栏 / 托盘都用它（一只猫头）。
@@ -200,6 +213,18 @@ let tray = null;
 let engine = null;
 let server = null;
 let broadcastTimer = null;
+/**
+ * 对外发状态时统一补上版本号（界面「设置 · 关于」卡要显示当前版本）。
+ * 三处出口（`/api/state`、定时广播、change 广播）共用它，避免三份拼装漂移。
+ * 用展开复制而不是往 `engine.state()` 里塞：Engine 是纯业务层，测试里直接
+ * `engine.state()` 拿快照，不该为界面字段去改它的形状。
+ *
+ * **必须声明在模块作用域**：`startBroadcast()` 的 100ms 定时器在
+ * `app.whenReady()` 回调之外定义，引用回调内的 const 会直接
+ * `ReferenceError: statePayload is not defined` —— 0.7.0 打包冒烟就是这样
+ * 每 100ms 弹一次报错框的（dev 路径只跑 headless，看不出来）。
+ */
+const statePayload = () => ({ ...(engine ? engine.state() : {}), version: APP_VERSION });
 /**
  * B站会话窗 / 弹幕通道。**必须声明在模块级**：`app.on('before-quit')` 要收掉它们，
  * 而那个回调在 `main()` 作用域之外 —— 写在 `main()` 里就会在退出时抛
@@ -721,7 +746,7 @@ function startBroadcast() {
   let lyricSentRev = -1;
   broadcastTimer = setInterval(() => {
     if (!server || !engine) return;
-    server.broadcast(engine.state());
+    server.broadcast(statePayload());
     if (engine.lyricRev !== lyricSentRev) {
       lyricSentRev = engine.lyricRev;
       server.broadcast(engine.lyricsPayload());
@@ -783,7 +808,7 @@ app.whenReady().then(async () => {
   });
 
   /**
-   * **后台预热网易云会话窗**（2026-09-26 加）。
+   * 后台预热网易云会话窗（2026-09-26 加）。
    *
    * 为什么：浏览器通道现在是取数主路径，而它第一次调用要 `ensureWindow()` ——
    * 即真的加载一遍 `https://music.163.com/`（一个不小的 SPA）。
@@ -978,7 +1003,7 @@ app.whenReady().then(async () => {
     host: config.server.host,
     rendererDir: RENDERER_DIR,
     sharedDir: SHARED_DIR,
-    getState: () => engine.state(),
+    getState: () => statePayload(),
     getLyrics: () => engine.lyricsPayload(),
     // 新接入的叠加层要立刻拿到当前配置（否则会用内置默认值渲染）
     getConfig: () => engine.config.overlay,
@@ -1115,7 +1140,7 @@ app.whenReady().then(async () => {
   await engine.init();
 
   engine.on('player', (cmd) => server.broadcast({ type: 'player', ...cmd }));
-  engine.on('change', () => server.broadcast(engine.state()));
+  engine.on('change', () => server.broadcast(statePayload()));
 
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
