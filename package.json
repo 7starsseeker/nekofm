@@ -65,6 +65,10 @@
       "!**/*.map",
       "!**/node_modules/**/{test,__tests__,docs,example,examples}/**"
     ],
+    "extraFiles": [
+      "LICENSE",
+      "NOTICE"
+    ],
     "win": {
       "icon": "build/icon.ico",
       "target": [
