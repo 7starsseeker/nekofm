@@ -625,7 +625,7 @@ class SelfTest {
               detail: `有 renderSig=${hasSig}；含主题等开关=${sigInclCfg}；重建条件用它=${gateUsesSig}`,
             };
           } },
-          { id: 'lyricStrip', name: '底部歌词条跟随歌词设置（源码级绊线）', run: async () => {
+          { id: 'lyricStrip', name: '底部歌词条使用独立外观设置（源码级绊线）', run: async () => {
             // 同上：歌词条的逐字门控与翻译行必须读叠加层配置，
             // 而不是自己拍脑袋决定（否则"面板里改了、歌词条不变"）
             const js = await (await fetch(base + '/assets/control.js')).text();
@@ -635,17 +635,22 @@ class SelfTest {
             const trans = /function applyTransRow/.test(js) && /ovCfg\.showTranslation/.test(js);
             const dom = html.includes('id="lsTrans"');
             /**
-             * 外观设置（字号/颜色/描边/透明度）也必须跟着叠加层走 ——
-             * 否则用户在面板里改这些，歌词条纹丝不动，看起来就是"点了保存没变化"
-             * （用户报告的原话）。要求：有 applyStripStyle，且它读 fontSize 与颜色。
+             * 2026-11-05 起，歌词条的外观是**它自己的设置**（stripFontSize /
+             * stripColor / stripActiveColor / stripStroke* / stripOpacity），
+             * 不再跟随叠加层 —— 这是用户明确要求的"两套单独的设置"。
+             * 这里守住：applyStripStyle 读 strip* 键；签名覆盖这些键；
+             * 并且不能再把叠加层的 fontSize 混进歌词条签名（会回归成联动）。
              */
             const style = /function applyStripStyle/.test(js)
-              && /ov\.fontSize/.test(js) && /ov\.activeColor/.test(js) && /ov\.color/.test(js);
+              && /ov\.stripFontSize/.test(js)
+              && /ov\.stripActiveColor/.test(js) && /ov\.stripColor/.test(js);
             // 签名要覆盖外观，否则"改了不重建"会重演
-            const sigCovers = /ovCfg\.fontSize/.test(js) && /ovCfg\.activeColor/.test(js);
+            const sigCovers = /ovCfg\.stripFontSize/.test(js) && /ovCfg\.stripActiveColor/.test(js);
+            const independent = !/ovCfg\.fontSize/.test(js) && !/ov\.fontSize/.test(js);
             return {
-              ok: gates && trans && dom && style && sigCovers,
-              detail: `已无逐字残留=${gates}；翻译行=${trans}；节点=${dom}；外观跟随=${style}；签名覆盖外观=${sigCovers}`,
+              ok: gates && trans && dom && style && sigCovers && independent,
+              detail: `已无逐字残留=${gates}；翻译行=${trans}；节点=${dom}；`
+                + `读独立外观键=${style}；签名覆盖独立外观=${sigCovers}；与叠加层字号解耦=${independent}`,
             };
           } },
           { id: 'previewBar', name: '叠加层预览窗有可关闭的入口与工具条开关', run: async () => {
@@ -749,7 +754,9 @@ class SelfTest {
             const label = ctl.includes('歌词透明度');
             const fitFn = /function fitLyrics\s*\(/.test(js) && /const MIN_FIT = 0\.\d+/.test(js);
             const order = /autoFit\(\);\s*\n\s*fitLyrics\(\);/.test(js);
-            const inFontSize = /--font-size',\s*\n?\s*Math\.max\(8, base \* scale \* S\.fontFit\)/.test(js)
+            // applyFontScale 现在复用 fontBasePx()，两种写法都必须承认：
+            // 关键是字号真的乘了 S.fontFit，而不是把自适应系数算完就扔。
+            const inFontSize = /fontBasePx\(\) \* S\.fontFit/.test(js)
               || /base \* scale \* S\.fontFit/.test(js);
             return {
               ok: stageOpacity && canvasClean && label && fitFn && order && inFontSize,
