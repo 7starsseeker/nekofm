@@ -224,6 +224,23 @@
     display: flex; align-items: center; justify-content: flex-end; gap: 6px;
   }
   .lyric-strip .ls-tools button { font-size: 12px; padding: 2px 8px; }
+  /* 底部歌词条设置浮层：固定在歌词条上方、靠右，不参与 grid，也不会被裁切。
+     只在歌词条展开时由 control.js 打开；保存/取消/收起歌词条都会隐藏。 */
+  .ls-panel {
+    position: fixed; right: 16px; bottom: calc(var(--strip-h) + 10px);
+    z-index: 103; width: min(360px, calc(100vw - 24px));
+    max-height: calc(100vh - var(--strip-h) - 24px); overflow: auto;
+    padding: 12px 14px; border-radius: 10px;
+    background: #0f1720; border: 1px solid #273548;
+    box-shadow: 0 18px 44px rgba(0, 0, 0, .6);
+  }
+  .ls-panel[hidden] { display: none; }
+  .ls-panel .ls-panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin-bottom: 8px; font-size: 14px;
+  }
+  .ls-panel .row { margin: 7px 0; }
+  .ls-panel .tip { line-height: 1.5; }
   .player-bar {
     position: fixed; left: 0; right: 0; bottom: var(--strip-h); z-index: 100;
     /* flex-wrap：窗口很窄时宁可换行，也不要各组合叠在一起（实测重叠过） */
@@ -639,11 +656,32 @@
     </div>
     <div class="tip" id="devHint">当前：系统默认</div>
     <div class="tip">把输出选到 VoiceMeeter 的音乐通道（如 <code>Voicemeeter Aux Input</code> / <code>CABLE Input</code>），好处是游戏声与音乐声互不干扰。选择会被记住，重启后自动恢复。</div>
+    <div class="tip">底部歌词条的字体、字号、颜色、描边不在这里 —— 展开歌词条后点右侧的「设置 ⚙」。</div>
   </div>
 
   <!-- 叠加层设置 -->
   <div class="card">
     <h2>歌词叠加层</h2>
+    <div class="row">
+      <label class="lbl">字体</label>
+      <select id="oFont" style="flex:1">
+        <option value='"Microsoft YaHei UI", "Noto Sans SC", system-ui, sans-serif'>微软雅黑 / 思源黑体（默认）</option>
+        <option value='"Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑", sans-serif'>微软雅黑（Windows）</option>
+        <option value='"Noto Sans SC", "Source Han Sans SC", "PingFang SC", sans-serif'>思源黑体 / 苹方</option>
+        <option value='"SimHei", "Microsoft YaHei UI", sans-serif'>黑体</option>
+        <option value='"SimSun", "Songti SC", serif'>宋体</option>
+        <option value='system-ui, -apple-system, "Segoe UI", sans-serif'>系统 UI</option>
+      </select>
+    </div>
+    <div class="row">
+      <label class="lbl">对齐</label>
+      <select id="oAlign" style="width:110px">
+        <option value="center">居中</option>
+        <option value="left">左对齐</option>
+        <option value="right">右对齐</option>
+      </select>
+      <span class="tip">长句自动缩小/换行时的水平对齐</span>
+    </div>
     <div class="row">
       <label class="lbl">样式</label>
       <!--
@@ -662,14 +700,36 @@
     </div>
     <div class="row"><label class="lbl">字号</label><input id="oSize" type="range" min="16" max="96" /><span id="oSizeTxt" class="tip"></span></div>
     <div class="row">
+      <label class="lbl">最小字号</label>
+      <input id="oMinFont" type="number" min="8" max="96" step="1" style="width:80px" /><span class="tip">px</span>
+    </div>
+    <div class="row">
       <label class="tip"><input id="oScaleFont" type="checkbox" /> 字号随源尺寸缩放（只有"源铺满整个画面"时才勾）</label>
     </div>
     <div class="tip">默认<b>不勾</b>：字号就是上面滑块的值 —— 配合「把浏览器源的框设成组件尺寸」用，
       框设多大、字幕就正好占多大，所见即所得。<br />
       勾上则按源高等比缩放（1080p 基准），适合把源铺满整个画面的用法。<br />
-      <b>太长的一句会自动缩小字号</b>（不缩就会被裁掉、显示不全）：从上面那个字号往下缩，
-      最多缩到 45%，装得下就停。</div>
+      <b>太长的一句会先自动缩小字号</b>：从上面那个字号往下缩，缩到「最小字号」还放不下就
+      <b>改为换行</b>，不再继续压到看不清。不勾下面的「长句优先不换行」时，一开始就允许折行、按高度缩。</div>
     <div class="tip" id="oBoxHint">—</div>
+    <div class="row">
+      <label class="lbl">左右安全区</label>
+      <input id="oInsetLeft" type="number" min="0" max="2000" step="1" style="width:80px" /><span class="tip">左</span>
+      <input id="oInsetRight" type="number" min="0" max="2000" step="1" style="width:80px" /><span class="tip">右 px</span>
+    </div>
+    <div class="row">
+      <label class="lbl">上下安全区</label>
+      <input id="oInsetTop" type="number" min="0" max="2000" step="1" style="width:80px" /><span class="tip">上</span>
+      <input id="oInsetBottom" type="number" min="0" max="2000" step="1" style="width:80px" /><span class="tip">下 px</span>
+    </div>
+    <div class="row">
+      <label class="tip"><input id="oSingleLine" type="checkbox" /> 长句优先不换行（缩到最小字号后再自动换行）</label>
+    </div>
+    <div class="tip">四个数字是<b>从画布四边往内缩的像素</b>，0 = 顶格。直播画面只截取中间一块时，
+      把左右/上下设成那块区域，歌词就只在这块安全区里排；<b>一句太长放不下就先缩字号</b>，
+      缩到最小字号仍放不下才折行。默认 左/右 48、上 12、下 16（与旧版一致）。<br />
+      极端情况（安全区极窄、字量极大）折行后高度仍超出时，会继续缩到 8px 兜底；
+      多出的部分被安全区裁掉，<b>不会画到区域外面</b>。</div>
     <div class="row"><label class="lbl">歌词透明度</label><input id="oOpacity" type="range" min="10" max="100" /><span id="oOpTxt" class="tip"></span></div>
     <div class="tip">只管<b>歌词</b>（正文 / 译文 / 底板一起变淡）。信息卡片有它自己那组的
       「透明度」，两个互不影响 —— 想让卡片常亮、只把歌词压暗，就调这一个。</div>
@@ -920,7 +980,53 @@
       + 禁止这首歌以后再自动匹配；再点一次恢复（立刻重取一次词）。
     -->
     <button id="btnLyricMismatch" disabled>歌词配错 ✕</button>
+    <button id="btnLyricStyle" title="设置底部歌词条的字体、字号、颜色、描边">设置 ⚙</button>
     <button id="btnLyricClose" title="隐藏歌词条（可以随时用播放器上的「歌词」按钮再打开）">收起</button>
+  </div>
+</div>
+
+<!-- 底部歌词条自己的设置面板：只管控制台这块歌词条，不动直播叠加层。 -->
+<div class="ls-panel" id="lyricStylePanel" hidden>
+  <div class="ls-panel-head">
+    <b>底部歌词条设置</b>
+    <button id="btnLyricStyleClose" class="ghost" title="关闭">✕</button>
+  </div>
+  <div class="row">
+    <label class="lbl">字体</label>
+    <select id="lsFont" style="flex:1">
+      <option value='"Microsoft YaHei UI", "Noto Sans SC", system-ui, sans-serif'>微软雅黑 / 思源黑体（默认）</option>
+      <option value='"Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑", sans-serif'>微软雅黑（Windows）</option>
+      <option value='"Noto Sans SC", "Source Han Sans SC", "PingFang SC", sans-serif'>思源黑体 / 苹方</option>
+      <option value='"SimHei", "Microsoft YaHei UI", sans-serif'>黑体</option>
+      <option value='"SimSun", "Songti SC", serif'>宋体</option>
+      <option value='system-ui, -apple-system, "Segoe UI", sans-serif'>系统 UI</option>
+    </select>
+  </div>
+  <div class="row">
+    <label class="lbl">字号</label>
+    <input id="lsSize" type="number" min="10" max="24" step="1" style="width:80px" />
+    <span class="tip">px（10~24，条高固定 74/94px）</span>
+  </div>
+  <div class="row">
+    <label class="lbl">正文色</label><input id="lsColor" class="swatch" type="color" />
+    <label class="lbl">当前句</label><input id="lsActive" class="swatch" type="color" />
+  </div>
+  <div class="row">
+    <label class="lbl">描边色</label><input id="lsStroke" class="swatch" type="color" />
+    <label class="lbl">描边宽</label>
+    <input id="lsStrokeW" type="range" min="0" max="12" style="flex:1" />
+    <span id="lsStrokeTxt" class="tip"></span>
+  </div>
+  <div class="row">
+    <label class="lbl">透明度</label>
+    <input id="lsOpacity" type="range" min="0" max="100" />
+    <span id="lsOpTxt" class="tip"></span>
+  </div>
+  <div class="tip">改动会即时预览。点「保存并收起」写入配置并关闭面板；点「取消」或 ✕ 会撤销未保存的改动并收起。</div>
+  <div class="tip">这些只影响控制台底部歌词条。直播画面里的字幕请到「歌词叠加层」里单独调，两边互不影响。</div>
+  <div class="row">
+    <button id="btnLyricStyleSave" class="primary" title="保存配置并收起面板">保存并收起</button>
+    <button id="btnLyricStyleCancel">取消</button>
   </div>
 </div>
 

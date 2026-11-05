@@ -217,7 +217,7 @@
    *     控制台歌词条与叠加层**都栽过这个坑**（见 overlay.js 的 currentPosition 注释）。
    */
   const SNAP = { position: 0, serverTime: Date.now(), paused: true, timeline: null, diag: null, hasLyric: false, rev: -1 };
-  const strip = { el: null, prev: null, cur: null, trans: null, next: null, on: false, lastIdx: -2, lastCfgSig: null, lastRev: -1, raf: 0 };
+  const strip = { el: null, panel: null, preview: null, prev: null, cur: null, trans: null, next: null, on: false, lastIdx: -2, lastCfgSig: null, lastRev: -1, raf: 0 };
 
   function onLyrics(m) {
     // 歌词是"大对象、低频变"（只在 rev 变化时推），收到就整体换掉
@@ -533,7 +533,8 @@
       else if (m.type === 'lyrics') { onLyrics(m); }
       else if (m.type === 'config' && m.overlay) {
         fillOverlayForm(m.overlay);
-        // 歌词条要用同一套歌词设置（主题/逐字/翻译），所以得记住它
+        // 歌词条要用同一套歌词内容设置（主题/翻译），所以得记住它；
+        // 外观（字体/字号/颜色/描边）是歌词条自己的 strip* 键，面板保存时自己应用。
         config = config || {};
         config.overlay = m.overlay;
       }
@@ -1471,6 +1472,7 @@
    */
   function initLyricStrip() {
     strip.el = $('lyricStrip');
+    strip.panel = $('lyricStylePanel');
     strip.prev = $('lsPrev');
     strip.cur = $('lsCur');
     strip.trans = $('lsTrans');
@@ -1478,6 +1480,27 @@
     if (!strip.el) return;
 
     if (config && config.overlay) applyStripStyle(config.overlay);
+
+    // 歌词条右侧「设置 ⚙」：打开/关闭它自己的外观面板。
+    // 面板里的字体/字号/颜色/描边/透明度全部写 strip* 键，和叠加层互不影响。
+    on('btnLyricStyle', 'click', () => {
+      if (!strip.panel) return;
+      if (strip.panel.hidden) {
+        strip.preview = null;   // 重新打开时从已保存配置开始
+        fillStripPanel(config && config.overlay);
+        strip.panel.hidden = false;
+      } else {
+        closeStripPanel();
+      }
+    });
+    on('btnLyricStyleClose', 'click', () => closeStripPanel());
+    on('btnLyricStyleCancel', 'click', () => closeStripPanel());
+    on('btnLyricStyleSave', 'click', saveStripPanel);
+    // 改控件就即时预览（不落盘）；点「保存」才写配置，保存后面板不关闭。
+    ['lsFont', 'lsSize', 'lsColor', 'lsActive', 'lsStroke', 'lsStrokeW', 'lsOpacity'].forEach((id) => {
+      on(id, 'input', previewStripPanel);
+      on(id, 'change', previewStripPanel);
+    });
 
     let saved = '1';
     try { saved = localStorage.getItem('nekofm.lyricStrip') || '1'; } catch { /* 忽略 */ }
@@ -1501,6 +1524,7 @@
     try { localStorage.setItem('nekofm.lyricStrip', strip.on ? '1' : '0'); } catch { /* 忽略 */ }
     updateStripHeight();
     if (strip.el) strip.el.hidden = !strip.on;
+    if (!strip.on) closeStripPanel();   // 收起歌词条时别把设置浮层孤零零留在页面上
     const b = $('btnLyricStrip');
     if (b) { b.style.borderColor = strip.on ? '#1d7b93' : ''; b.style.background = strip.on ? '#14586b' : ''; }
     if (strip.on) strip.lastIdx = -2;   // 重新展开时强制重画
@@ -1568,7 +1592,7 @@
 
     // ---- 还没唱到第一行（前奏 / 刚起播）
     if (!at || at.index < 0) {
-      applyStripStyle((config && config.overlay) || {});
+      applyStripStyle(effectiveStripCfg());
       if (force || strip.lastIdx !== -1) {
         strip.lastIdx = -1;
         strip.cur.className = 'ls-line ls-cur ls-plain ls-none';
@@ -1580,8 +1604,8 @@
       return;
     }
 
-    // 歌词外观全部来自叠加层那份配置（主题/翻译/字号/颜色…），见 applyStripStyle
-    const ovCfg = (config && config.overlay) || {};
+    // 歌词外观来自「已保存配置 + 面板里的即时预览」，见 effectiveStripCfg/applyStripStyle
+    const ovCfg = effectiveStripCfg();
 
     /**
      * **行变了才动 DOM** —— 每帧只改一个 CSS 变量。
@@ -1601,8 +1625,10 @@
      */
     const cfgSig = [
       ovCfg.theme, ovCfg.showTranslation,
-      ovCfg.fontSize, ovCfg.color, ovCfg.activeColor, ovCfg.strokeColor, ovCfg.strokeWidth,
-      ovCfg.opacity, ovCfg.align,
+      // 只认歌词条自己的 stripFontSize；叠加层的 fontSize 是另一套设置，
+      // 放进签名会导致"改直播字幕字号，底部歌词条也跟着重建"（2026-11-05 用户反馈）。
+      ovCfg.stripFontSize, ovCfg.stripFontFamily, ovCfg.stripColor, ovCfg.stripActiveColor,
+      ovCfg.stripStrokeColor, ovCfg.stripStrokeWidth, ovCfg.stripOpacity, ovCfg.align,
     ].join('|');
     if (force || at.index !== strip.lastIdx || cfgSig !== strip.lastCfgSig) {
       strip.lastCfgSig = cfgSig;
@@ -1645,32 +1671,148 @@
    * 之前歌词条只有自己一套写死的样式 —— 用户在面板里改字号/颜色/描边/对齐，
    * 叠加层跟着变了，歌词条却纹丝不动，于是"点了保存没变化"（用户报告）。
    * 现在这些设置都映射成 `--ls-*` 变量：
-   *   fontSize    → 当前行字号（**按比例缩下来**：叠加层那份是给直播画面用的，
-   *                 32px 直接塞进 74px 的条里会撑爆）
+   *   stripFontSize → 当前行字号（**歌词条自己的设置**，与叠加层 `fontSize` 无关；
+   *                   10~24px，因为 74/94px 高的条再大就会挤掉上下行）
    *   color       → 非当前行颜色
    *   activeColor → 当前行（含它的翻译行）颜色
    *   stroke*     → 文字描边（text-shadow）
    *   opacity     → 整条文字透明度
    *   align       → 对齐
    */
+  /** 底部歌词条自己的字号（10~24px）。缺省 23 = 旧版 round(42 * 0.55)，升级观感不变 */
+  function stripFontPx(ov) {
+    const n = Number(ov && ov.stripFontSize);
+    return Math.max(10, Math.min(24, Math.round(Number.isFinite(n) && n > 0 ? n : 23)));
+  }
+
+  /** 回填歌词条字体下拉；配置里是自定义字体栈时追加一项，避免保存时静默丢配置 */
+  function fillStripFontSelect(sel, value) {
+    if (!sel) return;
+    const v = value || '"Microsoft YaHei UI", "Noto Sans SC", system-ui, sans-serif';
+    let found = false;
+    for (let i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === v) { found = true; break; }
+    }
+    if (!found) {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = '自定义：' + v;
+      sel.appendChild(opt);
+    }
+    sel.value = v;
+  }
+
+  /** 打开面板时把当前配置回填进去（缺键回退到叠加层的旧值，保证老配置观感不变） */
+  function fillStripPanel(ov) {
+    ov = ov || {};
+    fillStripFontSelect($('lsFont'), ov.stripFontFamily || ov.fontFamily);
+    $('lsSize').value = stripFontPx(ov);
+    const color = ov.stripColor || ov.color;
+    const active = ov.stripActiveColor || ov.activeColor;
+    const stroke = ov.stripStrokeColor || ov.strokeColor;
+    if (/^#[0-9a-f]{6}$/i.test(color || '')) $('lsColor').value = color;
+    if (/^#[0-9a-f]{6}$/i.test(active || '')) $('lsActive').value = active;
+    if (/^#[0-9a-f]{6}$/i.test(stroke || '')) $('lsStroke').value = stroke;
+    const sw = Number(ov.stripStrokeWidth != null ? ov.stripStrokeWidth : ov.strokeWidth) || 0;
+    $('lsStrokeW').value = Math.max(0, Math.min(12, sw));
+    const op = ov.stripOpacity != null ? ov.stripOpacity : (ov.opacity == null ? 1 : ov.opacity);
+    $('lsOpacity').value = Math.round(Math.max(0, Math.min(1, Number(op) || 0)) * 100);
+    updateStripPanelReadouts();
+  }
+
+  function updateStripPanelReadouts() {
+    const sw = $('lsStrokeW');
+    if (sw && $('lsStrokeTxt')) $('lsStrokeTxt').textContent = sw.value + 'px';
+    const op = $('lsOpacity');
+    if (op && $('lsOpTxt')) $('lsOpTxt').textContent = op.value + '%';
+  }
+
+  /** 已保存配置 + 面板里的临时预览；每帧重绘都必须走这里，否则预览会被旧配置盖回去 */
+  function effectiveStripCfg() {
+    const base = (config && config.overlay) || {};
+    return strip.preview ? Object.assign({}, base, strip.preview) : base;
+  }
+
+  /**
+   * 面板里的控件一改就套到歌词条上（只改内联样式，不写配置）。
+   * 同时把预览值存进 strip.preview —— tickLyricStrip 每帧都会重算样式，
+   * 只改一次内联样式会被下一帧的已保存配置覆盖。
+   */
+  function previewStripPanel() {
+    if (!strip.panel || strip.panel.hidden) return;   // 关闭后延迟触发的 change 不能再把预览拉回来
+    updateStripPanelReadouts();
+    strip.preview = collectStripStyle();
+    applyStripStyle(effectiveStripCfg());
+    strip.lastCfgSig = null;
+  }
+
+  /** 面板里只收集歌词条自己的键；setOverlay 会深合进 overlay，不碰其它设置 */
+  function collectStripStyle() {
+    const hex = (id, fallback) => {
+      const v = $(id).value;
+      return /^#[0-9a-f]{6}$/i.test(v || '') ? v : fallback;
+    };
+    return {
+      stripFontSize: stripFontPx({ stripFontSize: $('lsSize').value }),
+      stripFontFamily: $('lsFont').value,
+      stripColor: hex('lsColor', '#ffe9a8'),
+      stripActiveColor: hex('lsActive', '#ffd54a'),
+      stripStrokeColor: hex('lsStroke', '#000000'),
+      stripStrokeWidth: Math.max(0, Math.min(12, Number($('lsStrokeW').value) || 0)),
+      stripOpacity: Math.max(0, Math.min(1, Number($('lsOpacity').value) / 100)),
+    };
+  }
+
+  /**
+   * 收起面板。丢掉未保存的预览：把歌词条恢复成「上次保存的配置」，
+   * 避免用户改了一半直接关掉、界面和配置文件对不上。
+   */
+  function closeStripPanel() {
+    strip.preview = null;
+    applyStripStyle((config && config.overlay) || {});
+    strip.lastCfgSig = null;
+    if (strip.panel) strip.panel.hidden = true;
+  }
+
+  async function saveStripPanel() {
+    const patch = collectStripStyle();
+    const r = await api({ action: 'setOverlay', overlay: patch });
+    if (!r || !r.ok) {
+      log('error', `底部歌词条设置保存失败：${(r && (r.error || (r.result && r.result.msg))) || '未知错误'}`);
+      return;
+    }
+    config = config || {};
+    config.overlay = Object.assign({}, config.overlay, patch);
+    strip.preview = null;      // 已落盘，之后每帧直接用 config.overlay
+    applyStripStyle(config.overlay);
+    strip.lastCfgSig = null;   // 下一帧按新字体/颜色/描边重画
+    closeStripPanel();         // 用户要求：保存后自动收起
+    log('info', '底部歌词条外观已保存');
+  }
+
   function applyStripStyle(ov) {
     if (!strip.el) return;
     const st = strip.el.style;
-    const fs = Math.max(13, Math.min(30, Math.round((ov.fontSize || 32) * 0.55)));
+    const fs = stripFontPx(ov);
     st.setProperty('--ls-fs', fs + 'px');
-    if (/^#[0-9a-f]{3,8}$/i.test(ov.color || '')) st.setProperty('--ls-color', ov.color);
-    if (/^#[0-9a-f]{3,8}$/i.test(ov.activeColor || '')) st.setProperty('--ls-active', ov.activeColor);
-    const sw = Number(ov.strokeWidth) || 0;
+    const font = ov.stripFontFamily || ov.fontFamily;
+    if (font) st.fontFamily = font;
+    const color = ov.stripColor || ov.color;
+    const active = ov.stripActiveColor || ov.activeColor;
+    if (/^#[0-9a-f]{3,8}$/i.test(color || '')) st.setProperty('--ls-color', color);
+    if (/^#[0-9a-f]{3,8}$/i.test(active || '')) st.setProperty('--ls-active', active);
+    const sw = Number(ov.stripStrokeWidth != null ? ov.stripStrokeWidth : ov.strokeWidth) || 0;
+    const sc = ov.stripStrokeColor || ov.strokeColor || '#000';
     st.setProperty('--ls-stroke', sw > 0
-      ? `0 1px ${Math.max(1, Math.round(sw / 2))}px ${ov.strokeColor || '#000'}`
+      ? `0 1px ${Math.max(1, Math.round(sw / 2))}px ${sc}`
       : 'none');
     st.textAlign = ov.align || 'center';
     /**
-     * 歌词条也吃「歌词透明度」（它就是歌词的另一个显示位置，跟自己窗里的那套口径一致）。
-     * 直接设元素 opacity —— 曾经还多设过一个 `--ls-opacity` 变量，但全工程没人用过它
-     * （真正的变淡只有这一行），2026-09-27 顺手删掉，免得让人以为设了两处。
+     * 透明度也独立：stripOpacity 优先，老配置没有时回退到 overlay.opacity。
+     * 直接设元素 opacity（全工程只在这里真正让歌词条变淡）。
      */
-    strip.el.style.opacity = String(ov.opacity == null ? 1 : ov.opacity);
+    const op = ov.stripOpacity != null ? ov.stripOpacity : (ov.opacity == null ? 1 : ov.opacity);
+    strip.el.style.opacity = String(op);
   }
 
   /** 歌词条高度：关掉=0 / 有翻译行=94 / 无翻译=74。播放器栏的 bottom 用同一个变量，会一起让位 */

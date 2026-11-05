@@ -130,9 +130,20 @@
 | `savedPlaylist` | 「已保存播放列表」，下播自动存、开播当闲时歌单 |
 | `playback` | 只有播放模式（`order` / `repeat-all` / `repeat-one` / `shuffle`） |
 | `idle` | 闲时歌单设置 |
-| `overlay` | 叠加层样式：主题、字号、颜色、描边、底板、行数、翻译/罗马音开关、信息栏 |
+| `overlay` | 叠加层样式：主题、字体/对齐、字号/最小字号、四边安全区、长句优先单行、颜色、描边、底板、行数、翻译/罗马音开关、信息栏；底部歌词条的独立外观见 `strip*` 键 |
 | `player` | 输出设备（`deviceId` / `deviceLabel`，供 `setSinkId`）、音量 `volume` / 静音 `muted`、歌词提前量 `prerollMs`、动态音量 `autoGain`（`enabled` / `targetDb`） |
 | `demo` | 演练模式素材开关 |
+
+**`overlay` 里和歌词排版相关的键**：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `fontSize` | `42` | 直播叠加层的基准字号（px） |
+| `minFontSize` | `18` | 长句缩字号的可读下限；有效值是 `min(minFontSize, fontSize)` |
+| `insetLeft` / `insetRight` / `insetTop` / `insetBottom` | `48 / 48 / 12 / 16` | 安全区：从画布四边往内缩的像素，0 = 顶格；默认值与旧版固定内缩一致 |
+| `singleLine` | `true` | 长句优先不换行；缩到 `minFontSize` 仍放不下才折行。关掉则一开始就折行 |
+| `stripFontSize` | `23` | **控制台底部歌词条**自己的字号，与 `fontSize` 独立 |
+| `stripFontFamily` / `stripColor` / `stripActiveColor` / `stripStrokeColor` / `stripStrokeWidth` / `stripOpacity` | 同叠加层默认值 | 底部歌词条自己的字体、正文色、当前句色、描边色/宽、透明度；与叠加层互不影响（对齐仍共用 `align`） |
 
 > 历史上 `playback` 段放过 `volume` / `muted`，现已统一到 `player` 段；
 > 老配置里残留的这两个字段无人读取，可放心忽略。

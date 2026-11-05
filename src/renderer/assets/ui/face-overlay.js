@@ -75,6 +75,27 @@
     var THEME_MIGRATE = { karaoke: 'scroll', desktop: 'dual' };
 
     /**
+     * 回填字体下拉。配置里的 fontFamily 可能是用户自己写的、不在预设里的字体栈，
+     * 这时追加一个「自定义」选项再选中它 —— 直接赋 value 会变成空选项，
+     * 用户一保存就把自己的字体悄悄改回默认，属于静默丢配置。
+     */
+    function fillFontSelect(sel, value) {
+      if (!sel) return;
+      var v = value || '"Microsoft YaHei UI", "Noto Sans SC", system-ui, sans-serif';
+      var found = false;
+      for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === v) { found = true; break; }
+      }
+      if (!found) {
+        var opt = document.createElement('option');
+        opt.value = v;
+        opt.textContent = '自定义：' + v;
+        sel.appendChild(opt);
+      }
+      sel.value = v;
+    }
+
+    /**
      * 按当前配置估算"**歌词块 / 信息卡片实际占多少像素**"，写进控制台，
      * 让用户在直播姬里照着填浏览器源的宽高 —— 这是"框贴合组件"的唯一可靠办法
      * （浏览器源的框就是页面视口，页面自己改不了它）。
@@ -86,7 +107,9 @@
       var el = $('oBoxHint');
       if (!el) return;
       var rows = o.showTranslation ? 2 : Math.max(1, 1 + (o.linesBefore | 0) + (o.linesAfter | 0));
-      var h = Math.round(rows * (o.fontSize || 42) * 1.28 * 1.12 + 18);
+      var padV = (o.insetTop == null ? 12 : Number(o.insetTop) || 0)
+        + (o.insetBottom == null ? 16 : Number(o.insetBottom) || 0);
+      var h = Math.round(rows * (o.fontSize || 42) * 1.28 * 1.12 + Math.max(18, padV));
       el.textContent = '💡 建议浏览器源尺寸（照着填进直播姬的宽高）：'
         + '歌词 → 画面宽 × ' + h + 'px；信息卡片 → 320 × 92px。'
         + '（浏览器源的框就是页面视口，页面改不了它，所以按这个尺寸填框最贴合）';
@@ -95,7 +118,10 @@
     function collectOverlay() {
       return {
         theme: $('oTheme').value,
+        fontFamily: $('oFont').value,
+        align: $('oAlign').value,
         fontSize: Number($('oSize').value),
+        minFontSize: Number($('oMinFont').value),
         opacity: Number($('oOpacity').value) / 100,
         backdrop: Number($('oBackdrop').value) / 100,
         backdropColor: $('oBdColor').value,
@@ -108,6 +134,11 @@
         showRoma: $('oRoma').checked,
         showTrackCard: $('oCard').checked,
         scaleFont: $('oScaleFont').checked,
+        insetTop: Number($('oInsetTop').value),
+        insetRight: Number($('oInsetRight').value),
+        insetBottom: Number($('oInsetBottom').value),
+        insetLeft: Number($('oInsetLeft').value),
+        singleLine: $('oSingleLine').checked,
       };
     }
 
@@ -116,8 +147,11 @@
       // 老配置里可能是已下线的主题 → 映射到最接近的一项，否则 select 会落到空值
       var theme = THEME_MIGRATE[o.theme] || o.theme || 'scroll';
       $('oTheme').value = THEME_PRESETS[theme] ? theme : 'scroll';
+      fillFontSelect($('oFont'), o.fontFamily);
+      $('oAlign').value = o.align || 'center';
       $('oSize').value = o.fontSize;
       $('oSizeTxt').textContent = o.fontSize + 'px';
+      $('oMinFont').value = o.minFontSize == null ? 18 : o.minFontSize;
       $('oOpacity').value = Math.round((o.opacity == null ? 1 : o.opacity) * 100);
       $('oOpTxt').textContent = $('oOpacity').value + '%';
       $('oBackdrop').value = Math.round((o.backdrop || 0) * 100);
@@ -133,6 +167,11 @@
       $('oRoma').checked = !!o.showRoma;
       $('oCard').checked = !!o.showTrackCard;
       $('oScaleFont').checked = !!o.scaleFont;
+      $('oInsetLeft').value = o.insetLeft == null ? 48 : o.insetLeft;
+      $('oInsetRight').value = o.insetRight == null ? 48 : o.insetRight;
+      $('oInsetTop').value = o.insetTop == null ? 12 : o.insetTop;
+      $('oInsetBottom').value = o.insetBottom == null ? 16 : o.insetBottom;
+      $('oSingleLine').checked = o.singleLine !== false;
       refreshBoxHint(o);
       fillInfoBarForm(o.infoBar);
     }
@@ -159,6 +198,22 @@
       }
     });
 
+    /**
+     * 歌词叠加层的其余外观项：改完即落盘并广播，直播姬里的叠加层立刻刷新。
+     * 用 change（松手 / 选项变化）而不是 input —— 滑杆拖动时 input 会连发几十次，
+     * 每次都 saveConfig 就是几十次磁盘写；change 一次拖拽只写一次。
+     */
+    ['oFont', 'oAlign', 'oSize', 'oOpacity', 'oBackdrop', 'oBdColor', 'oColor',
+      'oActive', 'oStroke', 'oStrokeW', 'oOffset', 'oTrans', 'oRoma', 'oCard', 'oScaleFont'
+    ].forEach(function (id) {
+      var e = $(id);
+      if (!e) return;
+      e.addEventListener('change', async function () {
+        var r = await api({ action: 'setOverlay', overlay: collectOverlay() });
+        if (!r.ok) log('error', '叠加层设置应用失败：' + ((r.result && r.result.msg) || r.error || '未知'));
+      });
+    });
+
     // 滑杆本身的读数提示：拖动时就跟着变（不落盘，落盘在 change 里）
     ['oTheme', 'oSize', 'oOpacity', 'oColor', 'oActive', 'oStroke', 'oStrokeW', 'oBackdrop',
       'oBdColor', 'oOffset', 'oTrans', 'oRoma', 'oCard', 'oScaleFont'].forEach(function (id) {
@@ -169,6 +224,20 @@
         $('oOpTxt').textContent = $('oOpacity').value + '%';
         $('oBdTxt').textContent = Number($('oBackdrop').value) === 0 ? '关' : $('oBackdrop').value + '%';
         $('oSwTxt').textContent = strokeHint($('oStrokeW').value, $('oSize').value);
+      });
+    });
+
+    /**
+     * 安全区、单行开关与最小字号：改完即时生效。
+     * 用户调这些，图的就是**马上在叠加层里看见**长句有没有缩进框内；
+     * 攒着等「应用并保存」等于盲调。数字框的 change 在失焦/回车时触发，不会逐字符落盘。
+     */
+    ['oInsetLeft', 'oInsetRight', 'oInsetTop', 'oInsetBottom', 'oSingleLine', 'oMinFont'].forEach(function (id) {
+      var e = $(id);
+      if (!e) return;
+      e.addEventListener('change', async function () {
+        var r = await api({ action: 'setOverlay', overlay: collectOverlay() });
+        if (!r.ok) log('error', '叠加层设置应用失败：' + ((r.result && r.result.msg) || r.error || '未知'));
       });
     });
 

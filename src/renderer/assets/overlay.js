@@ -372,6 +372,8 @@
     config: {
       theme: QS.get('theme') || 'scroll',
       fontSize: 42,
+      /** 长句缩字号的可读下限（px）：缩到这里还放不下就改成换行 */
+      minFontSize: 18,
       fontFamily: '"Microsoft YaHei UI", "Noto Sans SC", system-ui, sans-serif',
       color: '#ffe9a8',
       activeColor: '#ffd54a',
@@ -392,6 +394,13 @@
       offsetMs: 0,
       showTrackCard: true,
       prerollMs: 350,
+      /** 歌词安全区（px）：四边往内缩，0 = 顶格；默认值 = 旧版写死的 padding */
+      insetTop: 12,
+      insetRight: 48,
+      insetBottom: 16,
+      insetLeft: 48,
+      /** 长句优先不换行：先缩字号，缩到 minFontSize 还放不下才折行（见 fitLyrics） */
+      singleLine: true,
       infoBar: {
         enabled: true,
         position: 'top-left',
@@ -450,7 +459,11 @@
    *   · 换源尺寸不用重新调字号，比例自动保持
    * 所以控制台里的"字号"从此是**1080p 基准**的值 —— 和你把源设成 1920×1080 时看到的一致。
    */
-  function applyFontScale() {
+  /**
+   * 配置字号 × 源尺寸缩放，得到 `S.fontFit = 1` 时的基准像素。
+   * 拆出来是给 fitLyrics() 算"离可读下限还差多少"用，避免重复一遍 scaleFont 分支。
+   */
+  function fontBasePx() {
     const c = S.config;
     const base = Number(c.fontSize) || 42;
     const vh = window.innerHeight || 1080;
@@ -468,41 +481,127 @@
      * 那是给"源铺满整个画面"的用法准备的。
      */
     const scale = c.scaleFont ? (vh >= 400 ? (vh / 1080) : 1) : 1;
-    /**
-     * 再乘一个"长歌词自适应"系数（`S.fontFit`，由 fitLyrics() 算，默认 1）。
-     * 三个系数分头管三件事、互不干扰：配置字号 × 源尺寸缩放 × 这一句装不装得下。
-     * 折进 --font-size 一个变量里，正文/译文/描边（em）/底板全都跟着一起缩。
-     */
-    els.root.style.setProperty('--font-size',
-      Math.max(8, base * scale * S.fontFit).toFixed(2) + 'px');
+    return base * scale;
   }
 
-  /** 长歌词自适应：字号最多缩到配置值的这个比例，再小就没法看了（宁可裁） */
-  const MIN_FIT = 0.45;
+  function applyFontScale() {
+    /**
+     * 系数：配置字号 × 源尺寸缩放 × "长歌词自适应"（`S.fontFit`，由 fitLyrics() 算，默认 1）。
+     * 三个系数分头管三件事、互不干扰：配置字号、源尺寸、这一句装不装得下。
+     * 折进 --font-size 一个变量里，正文/译文/描边（em）/底板全都跟着一起缩。
+     */
+    const px = Math.max(8, fontBasePx() * S.fontFit);
+    els.root.style.setProperty('--font-size', px.toFixed(2) + 'px');
+    return px;
+  }
 
   /**
-   * 一句话太长（换行后整块比歌词区还高）时**自动缩小字号**，而不是被裁掉。
+   * 迭代收敛的防抖下限：不是可读性阈值（可读性由 `minFontSize` 管），
+   * 只防止浮点循环在临界值上无限逼近。
+   */
+  const MIN_FIT = 0.02;
+
+  /**
+   * 长歌词自适应：**优先保持一行、缩小字号；缩到可读下限还放不下就换行。**
    *
    * 用户要求（2026-09-27）："歌词太长的时候，自动缩小字体而不是截断导致显示不全"。
-   * 原来只有 autoFit()（装不下就删非当前行）—— 但**当前这一行自己就比舞台高**时它没辙
-   * （最后一行不能删），于是上下被 `overflow: hidden` 裁掉，看起来就是"显示不全"。
+   * 2026-11-05 追加：直播姬只截取画面中的一块当歌词条，折行会让整块高度超出截取范围，
+   * 所以默认 `singleLine` 下先按**宽度**把字缩到装得下为止。
+   * 同一天再次修正：只缩字号会把特别长的句子压到 8px 上下，直播画面里看不清 ——
+   * 于是加了 `minFontSize` 可读下限：缩到下限还放不下就**改用换行**，多占一行也认。
    *
-   * 做法：从 1 倍开始量，装不下就按高度比缩一档，最多几轮收敛（有 MIN_FIT 下限）。
-   * **每次都从 1 倍量起** —— 否则上一句缩过的比例会粘到下一句短句上。
-   * 调用点：重建歌词行之后（buildWindow）、窗口尺寸变化、配置变化（都走这三个入口）。
+   * 怎么量宽度：`white-space: nowrap` 时 `.line` 这个 flex 项的盒子会被文本撑成
+   * **自然宽度**（实测 1280 视口下长句 rect=1670.8，而容器只有 1184）——
+   * 直接量 `getBoundingClientRect().width` 就是"这句话本身有多宽"。
+   * 不能用 `.line.scrollWidth`：折行时它等于容器宽，横向溢出会被低估。
+   *
+   * 换行兜底写在 `.lines` 的**内联自定义属性**上（覆盖 applyConfig 写到根节点上的
+   * `--line-wrap`）；每次重新拟合先撤掉，短句不会继承上一句的折行状态。
+   *
+   * 高度仍用 `lines.scrollHeight`（含行距/译文/底板 padding）。两个方向取更紧的比例，
+   * 每次从 1 倍量起 —— 否则上一句缩过的比例会粘到下一句短句上。
+   * 调用点：重建歌词行之后（buildWindow）、窗口尺寸变化、配置变化。
    */
   function fitLyrics() {
-    const stageH = els.stage ? els.stage.clientHeight : 0;
-    if (!stageH || !els.lines) return;
-    let fit = 1;
-    for (let i = 0; i < 6; i++) {
-      S.fontFit = fit;
+    if (!els.stage || !els.lines) return;
+
+    // 先撤销上一次可能设置的换行兜底，让"优先单行"从配置值重新判断
+    els.lines.style.removeProperty('--line-wrap');
+    els.lines.style.removeProperty('--line-break');
+
+    if (!els.lines.children.length) {
+      // 没有歌词时把系数清回 1，免得空闲占位/下一首沿用上一句的缩小值
+      S.fontFit = 1;
       applyFontScale();
-      if (els.lines.scrollHeight <= stageH) return;   // 装得下，收工
-      if (fit <= MIN_FIT) return;                     // 已经到下限，认命（宁可裁）
-      // 按"还差多少"估下一档，留 2% 余量，免得在临界值上来回抖
-      const next = Math.max(MIN_FIT, fit * (stageH / els.lines.scrollHeight) * 0.98);
+      return;
+    }
+    const stageH = els.stage.clientHeight;
+    if (!stageH) return;
+
+    const cs = getComputedStyle(els.lines);
+    const availW = els.lines.clientWidth
+      - (parseFloat(cs.paddingLeft) || 0)
+      - (parseFloat(cs.paddingRight) || 0);
+    if (availW <= 0) return;
+
+    const basePx = fontBasePx();
+    const configuredMin = Number(S.config.minFontSize);
+    /**
+     * 可读下限不能超过用户自己配置的字号（把字号设成 16 时，
+     * 不应该反过来因为"下限 18"而强制换行），也不能低于 8px 的硬夹子。
+     */
+    const floorPx = Math.max(
+      8,
+      Math.min(
+        Number.isFinite(configuredMin) && configuredMin > 0 ? configuredMin : 18,
+        basePx
+      )
+    );
+
+    let fit = 1;
+    let wrapped = false;
+    for (let i = 0; i < 16; i++) {
+      S.fontFit = fit;
+      const px = applyFontScale();
+
+      // 横向只在"单行不换行"时检查：折行模式下行的盒子恒等于容器宽，
+      // 横向不会溢出，交给高度那一项处理即可。
+      let needW = 0;
+      if (!wrapped && S.config.singleLine !== false) {
+        for (const el of els.lines.children) {
+          const w = el.getBoundingClientRect().width;
+          if (w > needW) needW = w;
+        }
+      }
+      const needH = els.lines.scrollHeight;
+
+      // 留 8px 给描边/投影：rect 与 scrollHeight 都不含 text-stroke 的外扩，
+      // 贴着边量会在直播画面里被裁掉一两个像素。
+      if (needW <= availW - 8 && needH <= stageH) return;
+
+      // 已经到 8px 硬下限就认命 —— 正常歌词不会走到这里
+      if (px <= 8.01 || fit <= MIN_FIT) return;
+
+      const ratio = Math.max(
+        needW / Math.max(1, availW - 8),
+        needH / Math.max(1, stageH)
+      );
+      // 留 1.5% 余量，免得在临界值上来回抖
+      const next = Math.max(MIN_FIT, fit / Math.max(1.001, ratio) * 0.985);
       if (next >= fit - 0.005) return;
+
+      /**
+       * 单行优先，但"再缩就要低于可读下限"时停手，改成换行。
+       * 换行后宽度不再需要检查，只按高度继续拟合（极端长句仍可能需要再缩一点）。
+       */
+      if (!wrapped && S.config.singleLine !== false && next * basePx < floorPx - 0.01) {
+        wrapped = true;
+        els.lines.style.setProperty('--line-wrap', 'pre-wrap');
+        els.lines.style.setProperty('--line-break', 'break-word');
+        // 从下限对应的比例重新量；当前已经比下限更小时保持当前比例，不再放大
+        fit = Math.max(MIN_FIT, Math.min(fit, floorPx / Math.max(1, basePx)));
+        continue;
+      }
       fit = next;
     }
   }
@@ -570,6 +669,30 @@
       els.root.removeAttribute('data-backdrop');
     }
     st.setProperty('--align', c.align || 'center');
+    /**
+     * 歌词安全区：四边内缩（px，0 = 顶格）。
+     * 默认值就是旧版写死的 `12 / 48 / 16 / 48`，老配置升级后画面不变。
+     * 夹在 0~4000 之间：防止手填负数/天文数字把画布挤没或撑爆。
+     */
+    const inset = (v, d) => {
+      const n = Number(v);
+      return (Number.isFinite(n) ? Math.max(0, Math.min(4000, Math.round(n))) : d) + 'px';
+    };
+    st.setProperty('--inset-top', inset(c.insetTop, 12));
+    st.setProperty('--inset-right', inset(c.insetRight, 48));
+    st.setProperty('--inset-bottom', inset(c.insetBottom, 16));
+    st.setProperty('--inset-left', inset(c.insetLeft, 48));
+    /**
+     * 长句优先不换行（默认）：`nowrap` 让 `.line` 保持自然宽度，由 fitLyrics() 按宽度缩字号；
+     * 缩到 minFontSize 还放不下时，fitLyrics() 会在 `.lines` 上写内联的 pre-wrap 兜底。
+     * 关掉则一开始就回到 `pre-wrap`，在安全区内折行、按高度缩字号。
+     */
+    const singleLine = c.singleLine !== false;
+    st.setProperty('--line-wrap', singleLine ? 'nowrap' : 'pre-wrap');
+    st.setProperty('--line-break', singleLine ? 'normal' : 'break-word');
+    // 配置/字号/安全区变了，上一次长句写的内联换行兜底先撤掉，交给随后的 fitLyrics() 重判
+    els.lines.style.removeProperty('--line-wrap');
+    els.lines.style.removeProperty('--line-break');
     els.stage.setAttribute('data-theme', c.theme || 'scroll');
     applyInfoBarStyle();
     /**
@@ -589,7 +712,15 @@
     renderInfoBar._sig = null;
     renderInfoBar();
     reserveForInfoBar();
-    reapplyCenter();
+    /**
+     * 配置里可能改了**安全区 / 单行开关 / 字号**，这些都会改变"这一句装不装得下"，
+     * 但不会改行号，frame() 的渲染签名也不会变 —— 所以必须在这里重跑一次自适应。
+     * 放到 rAF 里等 CSS 变量与安全区的布局落定后再量。
+     */
+    requestAnimationFrame(() => {
+      fitLyrics();
+      reapplyCenter();
+    });
     /**
      * 这里**不再**靠 `S.renderedIndex = -2` 来"强制重建" ——
      * 那个字段根本没人读（frame() 的重建条件是 lastIndex + renderSig）。

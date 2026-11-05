@@ -78,11 +78,16 @@ html, body {
   justify-content: flex-end;
   align-items: stretch;
   /**
-   * 横向 padding 从 24px 加宽到 **48px**：给高亮行的放大留出余量
-   * （`.line.active` 有 `scale()`，而 `.stage` 是 `overflow: hidden` ——
-   *  横向空间不够时，大字那行的两端就会被裁掉。2026-09-26 用户反馈）。
+   * 四边内缩 = **歌词安全区**，由配置 overlay.insetTop/Right/Bottom/Left 驱动。
+   *
+   * 2026-11-05 用户反馈：直播姬只截取画面中的一块当歌词条时，写死的左右 48px
+   * 会让长歌词先折行、再撑出截取范围。改成变量后四边都能调到 0（顶格）或任意
+   * 内缩值；长句优先缩字号，缩到可读下限仍放不下才折行。
+   *
+   * 默认值就是旧版写死的 `12px 48px 16px`（上/右/下/左），画面不变。
    */
-  padding: 12px 48px 16px;
+  padding: var(--inset-top, 12px) var(--inset-right, 48px)
+           var(--inset-bottom, 16px) var(--inset-left, 48px);
 }
 
 /* ------------------------------------------------------------------ 歌词区 */
@@ -128,8 +133,15 @@ body.preview-mode .overlay-canvas { top: var(--preview-bar-h, 33px); }
   line-height: 1.28;
   font-weight: 800;   /* 加粗（用户要求加粗） */
   letter-spacing: 0.02em;
-  white-space: pre-wrap;
-  word-break: break-word;
+  /**
+   * 换行策略由配置 overlay.singleLine 驱动：
+   *   nowrap（默认）→ 先按单行宽度缩字号；缩到 minFontSize 还放不下时，
+   *                   fitLyrics() 会在 .lines 上写内联的 pre-wrap 兜底；
+   *   pre-wrap      → 旧行为，一开始就允许在安全区内折行，再按高度缩字号。
+   * `--line-wrap` 由 applyConfig() 写入。
+   */
+  white-space: var(--line-wrap, pre-wrap);
+  word-break: var(--line-break, break-word);
   opacity: var(--dim);
   transform-origin: var(--align) center;
   /* 高亮变化更柔：原来 .18s 的线性过渡看起来偏"生硬" */
