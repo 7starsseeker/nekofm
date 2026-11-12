@@ -306,8 +306,7 @@
       // 网易云搜索偶尔要好几秒（限流时更久）。**必须给出进展提示**，
       // 否则就是一直挂着"点歌中…"，用户以为卡死了（实测被反馈）。
       const t1 = setTimeout(() => { if (box) box.innerHTML = '<div class="tip">还在搜索（网易云较慢或正在限流），请稍候…</div>'; }, 5000);
-      const t2 = setTimeout(() => { if (box) box.innerHTML = '<div class="tip">搜索超过 15 秒，可能被网易云限流了 — 稍后再试，或先用「只搜索」</div>'; }, 15000);
-      let r;
+      const t2 = setTimeout(() => { if (box) box.innerHTML = '<div class="tip">搜索超过 15 秒，可能被网易云限流了 — 稍后再试，或先用「只搜索」</div>'; }, 15000);      let r;
       try {
         r = await api({ action: 'order', keyword: kw, source: src });
       } finally {
@@ -318,7 +317,11 @@
         const nm = d.item && d.item.song ? d.item.song.name : kw;
         // 自动匹配上了就直接放 —— 匹配度低时额外列出候选，但**不拦着播放**
         if (box) {
+          // 跨源挑歌时把"这次走的是哪个库"写出来 —— 两个库都有同一首时，
+          // 用户看到《晴天》播了谁，得知道是网易云还是酷狗，否则下次换成翻唱毫无线索。
+          const from = d.auto && d.auto.from ? (d.auto.from === 'kugou' ? '酷狗' : '网易云') : '';
           box.innerHTML = `<div class="tip">✅ 已自动匹配并播放：《${esc(nm)}》第 ${d.position} 位`
+            + (from ? `（${from}）` : '')
             + (d.lowConfidence ? '（匹配度不高，不是这首的话点下面换）' : '') + '</div>';
         }
         log('ok', `已点：《${nm}》第 ${d.position} 位`);
@@ -374,18 +377,73 @@
     on('btnOrder', 'click', doOrder);
     on('kw', 'keydown', (e) => { if (e.key === 'Enter') doOrder(); });
 
+    /**
+     * 结果条的「收起 / 清空」（2026-11-12 加）。
+     *
+     * 原来只有 `#results` 一个容器，搜完就永久占着版面，用户找不到任何收起/清空的入口。
+     * 「收起」只 `hidden`，数据留着 —— 再点「展开」原地恢复，不会因为收起而丢结果；
+     * 「清空」才真的扔掉（连结果条一起藏掉）。
+     */
+    on('btnResultsToggle', 'click', () => {
+      const box = $('results');
+      if (box.hidden && !box.innerHTML.trim()) return; // 空的就别展开了
+      box.hidden = !box.hidden;
+      $('btnResultsToggle').textContent = box.hidden ? '展开' : '收起';
+    });
+    on('btnResultsClear', 'click', () => {
+      const box = $('results');
+      box.innerHTML = '';
+      box.hidden = true;
+      $('resultsBar').hidden = true;
+      $('resultsInfo').textContent = '';
+      $('btnResultsToggle').textContent = '收起';
+    });
+
     on('btnSearch', 'click', async () => {
       const kw = $('kw').value.trim();
       if (!kw) return;
       const box = $('results');
+      const bar = $('resultsBar');
+      bar.hidden = false;
+      box.hidden = false;
+      $('btnResultsToggle').textContent = '收起';
       box.innerHTML = '<div class="tip">搜索中…</div>';
-      const r = await api({ action: 'neteaseSearch', keyword: kw, limit: 10 });
+      /**
+       * 「只搜索」跟着上面的音源下拉走（2026-11-12 加酷狗时一并修）。
+       * 以前这里写死 `neteaseSearch`：选了酷狗再点「只搜索」，列出来的是网易云的歌，
+       * 点「点这首」却把一首**没有 id 对应关系**的曲子当酷狗曲目塞进队列 ——
+       * 界面上看不出问题，播放时才炸。
+       *
+       * 下拉选「自动」= 两个曲库都搜，结果合并后按相关度排；这种混合列表
+       * **必须标出每条的来源**，否则用户看着《孤勇者》两条一模一样，不知道点哪条。
+       *
+       * 条数取 20：10 条在混合列表里平均每边只有 5 条，稍微冷门的原曲就翻不到
+       * （跨源搜索的每源保底名额也是按这个 limit 算的，见 engine.searchAll）。
+       */
+      const LIMIT = 20;
+      const srcSel = $('src').value;
+      const r = srcSel === 'kugou'
+        ? await api({ action: 'kugouSearch', keyword: kw, limit: LIMIT })
+        : srcSel === ''
+          ? await api({ action: 'musicSearch', keyword: kw, limit: LIMIT })
+          : await api({ action: 'neteaseSearch', keyword: kw, limit: LIMIT });
       const list = (r.result && r.result.songs) || [];
       box.innerHTML = '';
-      if (!list.length) { box.innerHTML = '<div class="tip">没有结果</div>'; return; }
+      if (!list.length) {
+        $('resultsInfo').textContent = '0 条';
+        box.innerHTML = '<div class="tip">没有结果</div>';
+        return;
+      }
+      const srcs = (r.result && r.result.sources) || null;
+      const tagOf = (s) => (s.source === 'kugou' ? '酷狗' : s.source === 'bilibili' ? 'B站' : '网易云');
+      $('resultsInfo').textContent = `找到 ${list.length} 条`
+        + (srcs
+          ? `（网易云 ${(srcs.netease && srcs.netease.count) || 0} · 酷狗 ${(srcs.kugou && srcs.kugou.count) || 0}）`
+          : `（${tagOf(list[0])}）`);
       list.forEach((s) => {
         const d = document.createElement('div');
-        d.innerHTML = `<span>${esc(s.name)}</span> <span class="tip">— ${esc(s.artistText)}</span> `;
+        const tag = tagOf(s);
+        d.innerHTML = `<span class="tip">[${tag}]</span> <span>${esc(s.name)}</span> <span class="tip">— ${esc(s.artistText)}</span> `;
         const b = document.createElement('button');
         b.textContent = '点这首';
         b.onclick = async () => {

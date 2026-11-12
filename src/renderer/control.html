@@ -125,7 +125,10 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .tip { font-size: 12px; color: var(--dim); line-height: 1.7; }
   .addr { font-family: ui-monospace, Consolas, monospace; background: #101720; border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; word-break: break-all; }
-  .qr { background: #fff; padding: 6px; border-radius: 8px; width: 168px; height: 168px; display: grid; place-items: center; }
+  /* 二维码白块：**由内容撑开**，不要写死 168×168 —— 图下面还有一行说明，
+     写死高度会让 img 溢出白块、压到下面的状态行上（用户实测反馈过）。
+     img 的尺寸交给这条 CSS，不要再在 JS 里写 inline width/height（inline 会盖掉它）。 */
+  .qr { background: #fff; padding: 8px; border-radius: 8px; display: inline-flex; flex-direction: column; align-items: center; gap: 2px; }
   .qr img, .qr canvas { width: 156px; height: 156px; display: block; }
   input[type=range] { flex: 1 1 120px; }
   .swatch { width: 30px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: #101720; }
@@ -313,6 +316,7 @@
 <header>
   <h1><img src="/assets/icon.png" alt="" class="app-logo" />NekoFM</h1>
   <span id="stNet" class="pill off">网易云 未登录</span>
+  <span id="stKugou" class="pill off">酷狗 未登录</span>
   <span id="stRoom" class="pill off">弹幕 未连接</span>
   <span id="stPlay" class="pill">播放 idle</span>
   <span id="stLyric" class="pill">歌词 0 行</span>
@@ -383,7 +387,9 @@
     <h2>点歌 / 检索</h2>
     <div class="row">      <input id="kw" type="text" placeholder="歌名 / 歌手 / ID 1234567，回车即点" />
       <select id="src">
-        <option value="">网易云</option>
+        <option value="">自动（网易云 + 酷狗）</option>
+        <option value="netease">网易云</option>
+        <option value="kugou">酷狗</option>
         <option value="local">本地</option>
         <option value="bilibili">B站视频</option>
       </select>
@@ -400,7 +406,18 @@
       本地入口统一在「本地音乐」卡片：打开文件 / 打开文件夹 / 重新扫描 / 曲库目录。
     -->
     <div class="tip">要放本地歌 → 用下方「本地音乐」卡片里的 <b>打开音乐文件…</b> / <b>打开音乐文件夹…</b>（和点歌一样排进当前播放列表）。</div>
-    <div id="results" class="log"></div>
+    <!--
+      搜索结果条（2026-11-12 加）：结果出来之后要能**收起来或清掉**。
+      原来只有一个 #results 容器、每次搜索直接 innerHTML 覆盖 —— 结果一出来就
+      永久占着版面，没有收起/清空的按钮（用户提过）。
+      「收起」只隐藏不丢数据（再点一次展开）；「清空」才真的扔掉。
+    -->
+    <div class="row" id="resultsBar" style="margin-top:6px" hidden>
+      <span id="resultsInfo" class="tip"></span>
+      <button id="btnResultsToggle">收起</button>
+      <button id="btnResultsClear">清空</button>
+    </div>
+    <div id="results" class="log" hidden></div>
   </div>
 
   <!-- 歌单 -->
@@ -634,17 +651,42 @@
 <aside>
   <!-- 网易云登录 -->
   <div class="card">
-    <h2>网易云登录（会员曲必需）</h2>
+    <h2>网易云登录</h2>
     <div class="row"><button id="btnQr" class="primary">生成扫码二维码</button><button id="btnBrowserLogin">打开登录窗（浏览器会话）</button><button id="btnNetStatus" title="向网易云核验一次，确认到底登没登进去">检测登录状态</button><button id="btnNetLogout" title="清掉 persistent partition 的全部 storage 和配置里的 cookie；下次扫码登新账号" style="margin-left:8px">登出（换号）</button><span id="qrStat" class="tip"></span></div>
     <div class="row"><div id="qrBox" class="qr" hidden></div></div>
-    <div class="tip" id="netStatus">登录状态未知 —— 点「检测登录状态」核验</div>
+    <!-- v2-keep：这是**实时读数**，不能被外壳收进「说明」折叠里（用户实测反馈：
+         登录状态藏在折叠里等于没有） -->
+    <div class="tip v2-status v2-keep" id="netStatus">登录状态未知 —— 点「检测登录状态」核验</div>
     <div class="tip">扫码后自动保存 cookie。没登录时会员曲只能放 45 秒试听片段。<br />
       「打开登录窗」会弹出一个真实浏览器窗口，登录一次即可：会话会持久保存，
-      既是登录手段，也是接口被掐时的<b>取流退路</b>。</div>
+      既是登录手段，也是接口被掐时的<b>取流退路</b>。<br />
+      <b>不登录也能用</b>：自动点歌时两边并搜，没登录网易云就走酷狗（免登录给全曲）；
+      只有你点名「点歌 网易云 X」且那是会员曲，才只能放 45 秒。</div>
     <div class="row" style="margin-top:8px">
       <input id="cookie" type="text" placeholder="也可直接粘贴 MUSIC_U cookie" />
       <button id="btnCookie">保存</button>
     </div>
+  </div>
+
+  <!--
+    酷狗登录（2026-11-12）：**可选**。
+    与网易云那张卡的定位不同 —— 网易云不登录，会员曲会被截成 45 秒；
+    酷狗的基线是免登录免费曲全曲，登录只解决「自己有酷狗会员、想让会员曲也放」
+    这一种情况。所以标题与文案都不能写成「必需」。
+  -->
+  <div class="card">
+    <h2>酷狗登录（可选 · 会员曲才需要）</h2>
+    <div class="row">
+      <button id="kqQr" class="primary">生成扫码二维码</button>
+      <button id="kqStatus">检测登录状态</button>
+      <button id="kqLogout" title="清掉配置里的酷狗 token/userid">登出</button>
+      <span id="kqStat" class="tip"></span>
+    </div>
+    <div class="row"><div id="kqBox" class="qr" hidden></div></div>
+    <div class="tip v2-status v2-keep" id="kqStatusText">未登录 —— 免费曲照常播全曲；会员曲会明确报「需要付费」。</div>
+    <div class="tip">二维码由酷狗服务端直接给出（base64 PNG），不走任何第三方服务。用酷狗 App 扫。<br />
+      <b>免费曲不需要登录</b>；登录只为会员曲能放全曲。酷狗不提供免密的会员状态查询，
+      所以这里只显示登没登录 —— 会员曲到底能不能放，以实际播放结果为准。</div>
   </div>
 
   <!-- 播放核心 -->

@@ -471,6 +471,7 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
         if (r.ok) {
           engine.config.netease.cookie = engine.netease.cookie;
           saveConfig(engine.config);
+          engine.invalidateVip();   // 换了账号，会员权益要重判
         }
         return r;
       }
@@ -478,16 +479,69 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
         engine.netease.cookie = cmd.cookie || '';
         engine.config.netease.cookie = engine.netease.cookie;
         saveConfig(engine.config);
+        engine.invalidateVip();
         const acc = await engine.netease.account();
         return { ok: true, loggedIn: engine.netease.isLoggedIn, profile: acc && acc.profile };
       }
       case 'neteaseMyPlaylists': return engine.netease.myPlaylists();
-      case 'neteaseBrowserLogin': return hooks.neteaseBrowserLogin
-        ? hooks.neteaseBrowserLogin()
-        : { ok: false, msg: '浏览器登录需要 Electron 运行环境' };
-      case 'neteaseBrowserLogout': return hooks.neteaseBrowserLogout
-        ? hooks.neteaseBrowserLogout()
-        : { ok: false, msg: '浏览器登出需要 Electron 运行环境' };
+      case 'neteaseBrowserLogin': {
+        if (!hooks.neteaseBrowserLogin) return { ok: false, msg: '浏览器登录需要 Electron 运行环境' };
+        const r = await hooks.neteaseBrowserLogin();
+        engine.invalidateVip();
+        return r;
+      }
+      case 'neteaseBrowserLogout': {
+        if (!hooks.neteaseBrowserLogout) return { ok: false, msg: '浏览器登出需要 Electron 运行环境' };
+        const r = await hooks.neteaseBrowserLogout();
+        engine.invalidateVip();
+        return r;
+      }
+
+      // ------------------------------------------------ 酷狗登录（会员曲才需要）
+      /**
+       * 与网易云登录同形：`qrCreate → qrCheck 轮询 → 成功写 cookie`。
+       *
+       * 差别在**登录不是必需**：酷狗通道的基线是免登录免费曲全曲，这里只解决
+       * 「用户自己有酷狗会员，想让会员曲也放」这一种情况。所以界面上它是可选的卡，
+       * 文案不能写成「会员曲必需」——那会让人以为不登录就没法用酷狗。
+       */
+      case 'kugouStatus': return engine.kugouStatus();
+      case 'kugouQrCreate': return engine.kugou.qrCreate();
+      case 'kugouQrCheck': {
+        const r = await engine.kugou.qrCheck(cmd.key);
+        if (r.ok) {
+          engine.config.kugou.cookie = engine.kugou.cookie;
+          // 记下"登的是谁"：界面要能像网易云那样写出昵称/UID，否则只显示"已登录"没法分辨换没换号
+          engine.config.kugou.nickname = r.nickname || '';
+          engine.config.kugou.userId = r.userId || '';
+          saveConfig(engine.config);
+          engine.invalidateVip();   // 换了账号，会员权益要重判
+        }
+        return r;
+      }
+      /** 粘贴兜底：接受 `token=…; userid=…` 整串（两个都得有，缺一个酷狗认不出人） */
+      case 'kugouSetCookie': {
+        const raw = String(cmd.cookie || '');
+        const t = raw.match(/token=([^;\s]+)/);
+        const u = raw.match(/userid=([^;\s]+)/);
+        if (!t || !u) return { ok: false, msg: '需要同时包含 token= 与 userid=（扫码登录会自动写入）' };
+        engine.kugou.setCookie(t[1], u[1]);
+        engine.config.kugou.cookie = engine.kugou.cookie;
+        engine.config.kugou.userId = u[1];
+        engine.config.kugou.nickname = '';   // 粘贴的 cookie 里没有昵称，界面只显示 UID
+        saveConfig(engine.config);
+        engine.invalidateVip();
+        return { ok: true, loggedIn: engine.kugou.isLoggedIn };
+      }
+      case 'kugouLogout': {
+        engine.kugou.logout();
+        engine.config.kugou.cookie = '';
+        engine.config.kugou.nickname = '';
+        engine.config.kugou.userId = '';
+        saveConfig(engine.config);
+        engine.invalidateVip();
+        return { ok: true, loggedIn: false };
+      }
 
       // ------------------------------------------------ B站登录态（视频字幕要用）
       /**
@@ -514,6 +568,17 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
        * 两条路都取全量、都会过黑名单、都会记录导入信息。
        */
       case 'neteaseSearch': return engine.netease.search(cmd.keyword || '', { limit: cmd.limit || 20 });
+      /**
+       * 酷狗检索（「只搜索」按钮在用）。
+       * 与 `neteaseSearch` 分开而不是塞一个 `source` 参数：返回结构虽然同形，
+       * 但两个 client 的错误文案/限流语义不同，混在一个 case 里以后很难改。
+       */
+      case 'kugouSearch': return engine.kugou.search(cmd.keyword || '', { limit: cmd.limit || 20 });
+      /**
+       * 跨源搜索（下拉选「自动」时的「只搜索」）。
+       * 与 `_orderAuto` 同一套打分，但**不入队** —— 用户要从合并后的列表里自己挑。
+       */
+      case 'musicSearch': return engine.searchAll(cmd.keyword || '', { limit: cmd.limit || 10 });
 
       // ------------------------------------------------ 歌单导入
       case 'playlistImport': {

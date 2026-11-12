@@ -77,7 +77,7 @@
     },
     {
       key: 'settings', label: '设置', hint: '每场直播只碰一次的东西', pinned: true,
-      cards: ['网易云登录（会员曲必需）', '播放核心 / 输出设备', '点歌设置', '弹幕点歌', '关于'],
+      cards: ['网易云登录', '酷狗登录（可选', '播放核心 / 输出设备', '点歌设置', '弹幕点歌', '关于'],
     },
   ];
 
@@ -151,10 +151,14 @@
 
     /* -------------------------------------------------- 3) 说明折叠 */
     /* 只搬卡片**直接子级**的 div.tip：`.row` 与 `h2` 里的 span.tip 是 JS 会写字的
-       实时读数（#liveStat / #qCount / #playSavedHint …），碰了就会断。 */
+       实时读数（#liveStat / #qCount / #playSavedHint …），碰了就会断。
+       `.v2-keep` 例外：它是**要一直看得见的实时读数**（登录状态），折进去等于没有
+       —— 用户实测反馈过一次「登录状态藏在说明里」。 */
     all.forEach(function (card) {
       var tips = Array.prototype.filter.call(card.children, function (el) {
-        return el.classList && el.classList.contains('tip') && el.tagName === 'DIV';
+        return el.classList && el.classList.contains('tip')
+          && !el.classList.contains('v2-keep')
+          && el.tagName === 'DIV';
       });
       if (!tips.length) return;
       var d = document.createElement('details');

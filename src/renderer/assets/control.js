@@ -316,6 +316,12 @@
       $('stNet').textContent = '网易云 ' + (s.netease && s.netease.loggedIn ? '已登录' : '未登录');
       $('stNet').className = 'pill ' + (s.netease && s.netease.loggedIn ? 'ok' : 'off');
     }
+    // 酷狗 pill：只反映 token 在不在（酷狗没有免密的会员状态端点，不敢标"会员"）
+    if ($('stKugou') && !$('stKugou').dataset.verified) {
+      const kg = !!(s.kugou && s.kugou.loggedIn);
+      $('stKugou').textContent = '酷狗 ' + (kg ? '已登录' : '未登录');
+      $('stKugou').className = 'pill ' + (kg ? 'ok' : 'off');
+    }
     /**
      * 弹幕状态。这里**只写房间的直播状态**，不再断言"收不到弹幕"。
      *
@@ -385,7 +391,7 @@
     const t = s.track;
     $('name').textContent = t ? (t.name || t.title || '—') : '—';
     $('artist').textContent = t ? (t.artistText || (t.artists || []).join(' / ') || '') : '';
-    $('srcTag').textContent = t ? ({ netease: '网易云', local: '本地', bilibili: 'B站' }[t.source] || t.source) : '—';
+    $('srcTag').textContent = t ? ({ netease: '网易云', kugou: '酷狗', local: '本地', bilibili: 'B站' }[t.source] || t.source) : '—';
     $('lyricTag').textContent = s.lyric ? ('歌词来源 ' + (s.lyric.source || '无')) : '—';
     /**
      * 封面取**服务端统一解析过**的那一份（`nowPlaying.cover`），不要用原始的 `track.cover`。
@@ -1008,7 +1014,7 @@
 
   // ---- 歌词配错（2026-10-16）
   /** 被禁名单里显示"来源"用；跟 engine 的 SOURCE_LABEL 是两码事（这里只管三个值） */
-  const LYRIC_SRC_TXT = { netease: '网易云', bilibili: 'B站', local: '本地' };
+  const LYRIC_SRC_TXT = { netease: '网易云', kugou: '酷狗', bilibili: 'B站', local: '本地' };
 
   /**
    * 底部歌词条上那颗按钮 + 「在线缓存」卡片里的被禁名单。

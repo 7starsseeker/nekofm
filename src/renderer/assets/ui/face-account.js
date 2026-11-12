@@ -47,7 +47,7 @@
       const img = document.createElement('img');
       img.src = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=2&data=${encodeURIComponent(url)}`;
       img.alt = '网易云扫码登录二维码';
-      img.style.cssText = 'width:200px;height:200px;background:#fff;padding:8px;border-radius:6px;display:block';
+      // 尺寸交给 `.qr img` 那条 CSS（inline 会盖掉它，图就撑出白块压到下面的说明上）
       img.onerror = () => {
         // 公共服务挂了时退回原方案（按钮 + URL）
         box.innerHTML = '';
@@ -66,7 +66,7 @@
       box.appendChild(img);
       const cap = document.createElement('div');
       cap.className = 'tip';
-      cap.style.cssText = 'max-width:220px;text-align:center;margin-top:4px';
+      cap.style.cssText = 'max-width:156px;text-align:center;margin-top:4px';
       cap.textContent = '手机端网易云 App 扫一扫 → 自动确认登录';
       box.appendChild(cap);
 
@@ -155,6 +155,93 @@
       log(res.loggedIn ? 'ok' : 'error', res.loggedIn ? '登录成功：' + ((res.profile && res.profile.nickname) || '') : 'cookie 无效或未包含 MUSIC_U');
     });
 
+    // ---------------------------------------------------------------- 酷狗扫码
+    /**
+     * 与网易云那张卡的差别（2026-11-12）：**登录不是必需**。
+     * 网易云不登录，会员曲被截成 45 秒；酷狗免登录就给免费曲全曲，
+     * 登录只解决「自己有酷狗会员，想让会员曲也放」。所以这里的文案一律
+     * 说"可选"，不写"必需"——写错了会让人以为不登录就用不了酷狗。
+     */
+    let kqTimer = null;
+    on('kqQr', 'click', async () => {
+      const r = await api({ action: 'kugouQrCreate' });
+      const res = (r && r.result) || {};
+      if (!r || !r.ok || !res.ok) {
+        log('error', '酷狗二维码生成失败：' + (res.msg || (r && r.error) || '未知错误'));
+        return;
+      }
+      const box = $('kqBox');
+      box.hidden = false;
+      box.innerHTML = '';
+      const img = document.createElement('img');
+      // 酷狗直接回 `data:image/png;base64,…`，不用像网易云那样借 api.qrserver.com 画图
+      img.src = res.img;
+      img.alt = '酷狗扫码登录二维码';
+      // 同上：不写 inline 尺寸，白块与图由 CSS 统一决定
+      box.appendChild(img);
+      const cap = document.createElement('div');
+      cap.className = 'tip';
+      cap.style.cssText = 'max-width:156px;text-align:center;margin-top:4px';
+      cap.textContent = '酷狗 App 扫一扫 → 手机上点确认';
+      box.appendChild(cap);
+
+      $('kqStat').textContent = '等待扫码…';
+      clearInterval(kqTimer);
+      kqTimer = setInterval(async () => {
+        const c = await api({ action: 'kugouQrCheck', key: res.key });
+        const d = (c && c.result) || {};
+        if (d.ok) {
+          clearInterval(kqTimer);
+          box.hidden = true;
+          $('kqStat').textContent = '✅ 登录成功' + (d.nickname ? `：${d.nickname}` : '');
+          log('ok', '酷狗登录成功，token 已保存' + (d.nickname ? `（${d.nickname}）` : ''));
+          await showKugouStatus(true);
+        } else {
+          $('kqStat').textContent = d.msg || '等待扫码…';
+          if (d.code === 0) clearInterval(kqTimer); // 0 = 二维码过期
+        }
+      }, 2000);
+    });
+
+    on('kqStatus', 'click', () => showKugouStatus(false));
+
+    on('kqLogout', 'click', async () => {
+      if (!await confirmDialog('登出酷狗账号？\n\n只清掉配置里的 token/userid；\n免费曲不受影响，会员曲会重新变成「需要付费」。')) return;
+      await api({ action: 'kugouLogout' });
+      log('info', '已登出酷狗');
+      await showKugouStatus(true);
+    });
+
+    /** 查询并显示酷狗登录态（pill + 卡片里的说明） */
+    async function showKugouStatus(quiet = false) {
+      const el = $('kqStatusText');
+      if (el && !quiet) el.textContent = '正在查询…';
+      const r = await api({ action: 'kugouStatus' });
+      const d = (r && r.result) || {};
+      const pill = $('stKugou');
+      if (pill) {
+        pill.dataset.verified = '1'; // 核验过就以核验结果为准，别被 100ms 的状态广播覆盖
+        pill.textContent = d.loggedIn ? '酷狗 已登录' : '酷狗 未登录';
+        pill.className = 'pill ' + (d.loggedIn ? 'ok' : 'off');
+      }
+      if (el) {
+        /*
+         * 和网易云那条**同一套句式**（「已登录：昵称（UID …）· 权益」），
+         * 两边并排看时才分得清谁是谁。酷狗没有免密会员查询，会员态靠样本曲
+         * 试取流推出来，所以另外两种情况必须如实写"推不出来"，不能一律写"已登录"。
+         */
+        const who = d.nickname ? `${d.nickname}（UID ${d.uid || '?'}）`
+          : (d.uid ? `UID ${d.uid}` : '账号');
+        el.textContent = !d.loggedIn
+          ? '❌ 未登录：免费曲照常播全曲；会员曲会明确报「需要付费」。'
+          : `✅ 已登录：${who}`
+            + (d.vip === 'yes' ? ' · 会员权益有效'
+              : d.vip === 'no' ? ' · 非会员（会员曲仍会报「需要付费」）'
+                : ' · 会员状态未知（样本曲探测失败），以实际播放为准');
+      }
+      return d;
+    }
+
     // ---------------------------------------------------------------- 播放设备
     /**
      * 设备下拉刷新。
@@ -212,6 +299,27 @@
     function fillFromConfig(config) {
       if (!config || !config.netease) return;
       if (config.netease.cookie) $('cookie').placeholder = '已配置（留空则不变）';
+      /**
+       * 酷狗：只按"配置里有没有 token"给出**待核验**的初值。
+       * 真正权威的状态要 `/api/state`（或点「检测登录状态」）—— 这里不假装已核验。
+       */
+      if (config.kugou) {
+        const has = !!config.kugou.cookie;
+        const pill = $('stKugou');
+        if (pill) {
+          pill.textContent = has ? '酷狗 已登录' : '酷狗 未登录';
+          pill.className = 'pill ' + (has ? 'ok' : 'off');
+        }
+        const el = $('kqStatusText');
+        if (el) {
+          const who = config.kugou.nickname
+            ? `${config.kugou.nickname}（UID ${config.kugou.userId || '?'}）`
+            : (config.kugou.userId ? `UID ${config.kugou.userId}` : '账号');
+          el.textContent = has
+            ? `配置里有 ${who} 的 token —— 点「检测登录状态」核验；会员曲以实际播放为准。`
+            : '❌ 未登录：免费曲照常播全曲；会员曲会明确报「需要付费」。';
+        }
+      }
     }
 
     return { refreshDevices, checkNeteaseStatus, fillFromConfig };

@@ -31,6 +31,7 @@ const DEFAULT_WORDS = {
 
 const DEFAULT_SOURCE_ALIAS = {
   网易云: 'netease', 网易: 'netease', 网抑云: 'netease', netease: 'netease',
+  酷狗: 'kugou', kugou: 'kugou', kg: 'kugou',
   b站: 'bilibili', bilibili: 'bilibili', 哔哩哔哩: 'bilibili', 视频: 'bilibili',
   本地: 'local', local: 'local',
 };

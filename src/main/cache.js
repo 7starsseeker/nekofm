@@ -226,6 +226,12 @@ class MediaCache {
   keyFor(track) {
     if (!track) return null;
     if (track.source === 'netease' && track.id != null) return `netease-${track.id}`;
+    /**
+     * 酷狗：`id` 是 32 位 FileHash（大写十六进制）。**不给它加键的话所有酷狗曲目
+     * 都"永不被缓存"** —— `keyFor` 返回 null，`resolveStream` 的缓存探测与
+     * `cacheSrc` 的落盘会一起静默跳过，用户看到的就是"这首怎么每次都要重新拉网"。
+     */
+    if (track.source === 'kugou' && track.id != null) return `kugou-${track.id}`;
     if (track.source === 'bilibili' && (track.bvid || track.cid)) {
       return `bilibili-${track.bvid || track.cid}${track.cid && track.bvid ? '-' + track.cid : ''}`;
     }

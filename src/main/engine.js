@@ -15,6 +15,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { configPath } = require('../core/config');
 const { NeteaseClient, repairNeteaseCover } = require('../core/netease/client');
+const { KugouClient } = require('../core/kugou/client');
 const { BiliApi } = require('../core/bilibili/api');
 const { biliFetch, WbiSigner } = require('../core/bilibili/wbi');
 const { DanmakuClient } = require('../core/bilibili/danmaku');
@@ -85,9 +86,98 @@ function titleSimilarity(a, b) {
 /** 标题相似度低于此值时，认为"匹配错了"，宁可不给歌词 */
 const TITLE_MATCH_MIN = 0.6;
 
+/**
+ * 判「酷狗这个账号有没有会员权益」用的样本曲：薛之谦《演员》。
+ *
+ * 为什么会存在这么个常量：酷狗没有免密的会员查询接口，唯一可靠的信号是
+ * "拿一首确定要付费的歌去取流，看它给不给地址"。这首歌在 2026-11-12 实测
+ * `pay_type=3 / privilege=10 / error=需要付费`（免费账号取不到地址），
+ * 而翻唱、Live 版都是免费曲，不会误判成"能放"。
+ *
+ * 风险与取舍：这条曲目若某天下架/转免费，探测会从 yes 掉到 unknown，
+ * 那时跨源挑歌退回"按登录态"的老规则 —— 不会把没会员的账号当成有会员。
+ */
+const KUGOU_VIP_SAMPLE = 'D174CBA0884A80F5F8BCE2E513E34AC7';
+
+/**
+ * 标题的"朴素键"：去掉版本标注（括号内容、feat. 之后）与所有标点空白。
+ *
+ * 只用于回答一个问题：**两个源里的这两条，是不是"同一首歌"**。
+ * 与 `titleSimilarity` 的分工不一样 —— 那个打分要在"不相似"里筛掉配错的，
+ * 所以括号里的「Live」也算文本；这个要的是"《孤勇者》和《孤勇者 (DJ Bo版)》
+ * 是同一首的两种版本"，所以版本标注必须丢掉。
+ *
+ * 实测（2026-11-12，双源点歌）：酷狗对「孤勇者」的前几条是
+ * 「孤勇者 (DJ Bo版)」「孤勇者 (网友改编)」，标题键去掉括号后都等于「孤勇者」，
+ * 于是被判成"两边都有" —— 这正是我们要的：**同一首歌的不同版本**，
+ * 该由"哪个源能放全曲"来决定，而不是让 DJ 版在相似度上输给原唱。
+ */
+function titleKey(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[（(【\[].{0,40}?[）)】\]]/g, '')
+    .replace(/\s+(feat|ft)\.?\s+.*$/i, '')
+    .replace(/[\s\-_()[\]{}【】（）,.，。!！?？'"“”‘’·:：;；|/\\]+/g, '');
+}
+
+/**
+ * 把一段文字压成「小写 + 标点当空格」的朴素串，供**按词比对**用。
+ *
+ * 和 `titleKey` 的区别：那个去掉一切分隔符（判"是不是同一首歌"），
+ * 这个保留空格（判"关键词里的每一段能不能在歌名+歌手里找到"）。
+ * `HOYO-MiX` → `hoyo mix`，于是关键词里的 `hoyo` 才命中得了。
+ */
+function plainText(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[\-_()[\]{}【】（）,.，。!！?？'"“”‘’·:：;；|/\\]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * 关键词按词打分，**区分命中位置**（`_scoreSong` 的分段命中内核）。
+ *
+ * 三档权重：
+ *   1.2 —— 落在**歌手**里。「这首歌是谁唱的」比「歌名里出现过这个词」强：
+ *          搜「无中生有 HOYO」时，原曲的 HOYO-MiX 在歌手位，是硬证据。
+ *   1.0 —— 落在**歌名主体**里（括号外的部分）。
+ *   0.6 —— 只落在**括号里**。括号里通常是 `(cover：HOYO-Mix)`、`(Live)`、
+ *          `(伴奏)` 这类版本/署名标注，是"翻唱自谁"而不是"谁唱的"，
+ *          和歌手同权会让搬运版骑到原曲头上（用户截图里就是这样）。
+ *
+ * 返回 `0.5..1.0`；关键词不足两段（「晴天」这种纯歌名）返回 `null`，
+ * 交给调用方原有的整串判断，避免把单字/单词关键词的打分也搅进去。
+ */
+function tokenScore(kw, name, artist) {
+  const toks = plainText(kw).split(' ').filter((x) => x.length >= 2);
+  if (toks.length < 2) return null;
+  const titleAll = plainText(name);
+  const titleCore = plainText(String(name || '').replace(/[（(【\[].{0,40}?[）)】\]]/g, ' '));
+  const a = plainText(artist);
+  let sum = 0;
+  for (const t of toks) {
+    if (a.includes(t)) sum += 1.2;
+    else if (titleCore.includes(t)) sum += 1.0;
+    else if (titleAll.includes(t)) sum += 0.6;
+  }
+  return 0.5 + 0.5 * (sum / (1.2 * toks.length));
+}
+
+/**
+ * 「没有人声的同一首」类版本标注，`_scoreSong` 里给它们轻微降权。
+ *
+ * 只收**明确表示"不是原唱人声版"**的词：伴奏 / 伴唱 / 纯音乐 / instrumental /
+ * karaoke / off vocal。`(Live)`、`(remix)`、`(cover：…)` 不在这里 —— 那些
+ * 有的用户就是要，而 cover 已经由 `tokenScore` 的括号权重管着了，
+ * 再叠一层会变成"谁翻唱谁判死刑"，越权替用户做决定。
+ */
+const VERSION_MARK = /伴奏|伴唱|纯音乐|instrumental|karaoke|off\s?vocal/i;
+
 /** 音源显示名（信息栏的角标用） */
 const SOURCE_LABEL = {
   netease: '网易云',
+  kugou: '酷狗',
   local: '本地',
   bilibili: 'B站视频',
 };
@@ -133,6 +223,19 @@ class Engine extends EventEmitter {
     this._connSeq = 0;
 
     this.netease = new NeteaseClient({ cookie: config.netease.cookie, log, browser });
+    /**
+     * 酷狗通道（2026-11-12 加）。
+     * 只做"免费曲可播"这一层：**没有登录态**，所以 VIP 曲会在取流时明确报
+     * 「需要付费（pay_type=3）」而不是放一段试听 —— 实测酷狗对 VIP 曲
+     * 直接不给 `url`，不存在"看起来成功其实是片段"的陷阱。
+     */
+    this.kugou = new KugouClient({
+      timeout: (config.kugou && config.kugou.timeout) || 8000,
+      cookie: (config.kugou && config.kugou.cookie) || '',
+      log,
+    });
+    /** 各源会员权益的探测结果（`_vipOf` 填，登录/登出时清空） */
+    this._vipCache = null;
     this.bili = new BiliApi({ cookie: config.bilibili.cookie, logger: log });
     this.local = new LocalLibrary({
       dirs: config.local.dirs,
@@ -863,22 +966,62 @@ class Engine extends EventEmitter {
    */
   _pickBestMatch(keyword, songs) {
     const kw = String(keyword || '').trim().toLowerCase();
-    const scored = (songs || []).map((s) => {
-      const t = String(s.name || s.title || '').toLowerCase();
-      let sim = titleSimilarity(kw, t);
-      // 关键词是标题的一部分（"孤勇" ⊂ "孤勇者"）也算合理匹配
-      if (t && (t.includes(kw) || kw.includes(t))) sim = Math.max(sim, 0.75);
-      // 歌手名命中再加一点（"周杰伦 稻香" 这类写法）
-      const artist = String(s.artistText || (s.artists || []).join(' ')).toLowerCase();
-      if (artist && artist.includes(kw)) sim = Math.max(sim, 0.6);
-      return { s, sim };
-    }).sort((a, b) => b.sim - a.sim);
+    const scored = (songs || []).map((s) => ({ s, sim: this._scoreSong(kw, s) }))
+      .sort((a, b) => b.sim - a.sim);
     const best = scored[0];
     return {
       best: best && best.s,
       confidence: best ? best.sim : 0,
       candidates: scored.slice(0, 8).map((x) => x.s),
     };
+  }
+
+  /**
+   * 单条曲目对关键词的相似度（`_pickBestMatch` 的打分内核）。
+   *
+   * 抽出来是为了让"跨源挑歌"能用**同一把尺子**去量两个源的候选 ——
+   * 两个源各有一套自己的相关度排序，直接比"谁排第一"没有意义。
+   */
+  _scoreSong(kw, s) {
+    const name = String(s.name || s.title || '');
+    const artist = String(s.artistText || (s.artists || []).join(' '));
+    const t = name.toLowerCase();
+    let sim = titleSimilarity(kw, t);
+    // 关键词是标题的一部分（"孤勇" ⊂ "孤勇者"）也算合理匹配
+    if (t && (t.includes(kw) || kw.includes(t))) sim = Math.max(sim, 0.75);
+    // 歌手名命中再加一点（"周杰伦 稻香" 这类写法）
+    const a = artist.toLowerCase();
+    if (a && a.includes(kw)) sim = Math.max(sim, 0.6);
+    /**
+     * 「歌名 + 歌手」**分段**命中 —— 2026-11-12 的两轮实盘：
+     *
+     * 第一轮：搜「无中生有 HOYO」，酷狗有《无中生有 Ex Nihilo》/ HOYO-MiX（网易云没有）。
+     * 原先两处都只拿**整串**关键词去比：标题被「Ex Nihilo」拉低到 0.33，
+     * 歌手那处要 `artist.includes(整串关键词)` 才给分 —— 正确答案 0.33，
+     * 输给一堆同名歌（0.85），在合并列表里被挤到第 11 名外干脆不显示。
+     * ⇒ 改成按词拆开逐个找。
+     *
+     * 第二轮（用户截图）：拆是拆了，但**不区分这段词落在歌名还是歌手**，
+     * 于是「无中生有ExNihilo（cover：HOYO-Mix）」这种**把原唱写在括号里**的
+     * 搬运版拿满分，反而排在原曲前面 —— 用户看到的是「网易云总是优先」。
+     * ⇒ 分三档权重，见 `tokenScore`：歌手 1.2 > 歌名 1.0 > 括号署名 0.6。
+     * 括号里的是"翻唱自谁"，不是"谁唱的"，不该和歌手同权。
+     */
+    const tok = tokenScore(kw, name, artist);
+    if (tok != null) sim = Math.max(sim, tok);
+    /**
+     * 版本标注降权（-0.03，轻微）。
+     *
+     * 实盘：搜「无中生有 HOYO」时，酷狗《无中生有 Ex Nihilo》与它的
+     * 《(伴奏)》同分（词元全中），排序只剩下游的返回顺序说了算。
+     * 伴奏是"没有人声的同一首"，绝大多数点歌的人要的是原曲，
+     * 所以给它一点劣势 —— 但只降 0.03，不敢多降：
+     * 万一某个冷门歌真的只有伴奏版，优势仍然够它从同名曲里浮上来。
+     *
+     * 关键词自己带了这几个词（「点歌 晴天 伴奏」）时跳过 —— 用户就是在找它。
+     */
+    if (VERSION_MARK.test(name) && !VERSION_MARK.test(kw)) sim = Math.max(0, sim - 0.03);
+    return sim;
   }
 
   async orderByKeyword(keyword, source, user, { interactive = false } = {}) {
@@ -896,7 +1039,22 @@ class Engine extends EventEmitter {
       this.notify('reject', `${user.uname}：这首不能点（${pre.why}）`);
       return { ok: false, reason: 'blacklisted', msg: `已在黑名单：${pre.why}`, rule: pre.rule };
     }
-    const src = source || this.config.netease.defaultSource;
+    /**
+     * 用哪个曲库（2026-11-12 定的规则，用户原话：「两边都搜索，然后看最匹配的，
+     * 两边都有的话走有VIP的（目前是网易云有VIP）」）：
+     *
+     *   - **没点名源**（弹幕「点歌 晴天」、控制台下拉选「自动」）→ `auto`：
+     *     网易云与酷狗**并行搜**，用同一把尺子挑最匹配的那条；两边都能搜到
+     *     "同一首"就走**有会员权益的那个源**（登录了网易云 = 网易云；
+     *     没登录就用酷狗 —— 未登录的网易云对会员曲只给 45 秒，那不算"有权益"）。
+     *   - **点名了源**（`点歌 酷狗 X` / 下拉选酷狗）→ 只搜那一家，**绝不偷偷换源**：
+     *     用户明确说了用谁，换源就是骗他。
+     *
+     * `search.crossSource: false` 可退回旧行为（只搜 `netease.defaultSource`），
+     * 留给"网慢、不想每次点歌都多打一个搜索"的人。
+     */
+    const cross = !(this.config.search && this.config.search.crossSource === false);
+    const src = source || (cross ? 'auto' : this.config.netease.defaultSource);
     try {
       /**
        * **按网易云歌曲 ID 直接点播** —— 指令是 `点歌 ID 1234567`（2026-09-26 用户定的）。
@@ -913,6 +1071,7 @@ class Engine extends EventEmitter {
        */
       const asId = String(keyword).trim().match(/^id\s+(\d+)$/i);
       if (asId) return await this.orderSongById(asId[1], user);
+      if (src === 'auto') return await this._orderAuto(keyword, user);
       if (src === 'local') {
         const hits = this.local.search(keyword, 5);
         if (!hits.length) { this.stats.rejected++; return this.notify('reject', `${user.uname}：本地曲库没找到「${keyword}」`); }
@@ -937,6 +1096,16 @@ class Engine extends EventEmitter {
           ...(cid ? { cid } : {}),
         }, user);
       }
+      if (src === 'kugou') {
+        const r = await this.kugou.search(keyword, { limit: 8 });
+        if (!r.ok || !r.songs.length) {
+          this.stats.rejected++;
+          const why = r.msg || `酷狗没搜到「${keyword}」`;
+          this.notify('reject', `${user.uname}：${why}`);
+          return { ok: false, reason: r.ok ? 'notfound' : 'limit', msg: why, candidates: [] };
+        }
+        return this._enqueueBestMatch(keyword, r.songs, user);
+      }
       const r = await this.netease.search(keyword, { limit: 8 });
       if (!r.ok || !r.songs.length) {
         this.stats.rejected++;
@@ -944,34 +1113,238 @@ class Engine extends EventEmitter {
         this.notify('reject', `${user.uname}：${why}`);
         return { ok: false, reason: r.ok ? 'notfound' : 'limit', msg: why, candidates: [] };
       }
-      const m = this._pickBestMatch(keyword, r.songs);
-      /**
-       * 取哪一首：**低置信度时信任搜索引擎自己的相关度排序**。
-       *
-       * 我这套相似度是二元组 Dice，遇到「假面骑士build」这种中日英混写、
-       * 或者「孤勇」这种半截标题就算不出来（置信度很低）。而网易云的搜索
-       * 用的是一套成熟的相关度模型，它的第 1 条通常就是对的。
-       * 所以：我确信时用我的判断（能纠正"标题像但歌手不对"），
-       * 我不确信时就用它的第 1 条 —— 而不是把选择甩回给用户。
-       * 用户要的是"自动匹配一个最合适的然后开始播放"。
-       */
-      const lowConf = m.confidence < 0.45;
-      const picked = lowConf ? r.songs[0] : m.best;
-      if (lowConf) {
-        this.log(`[engine] 点歌「${keyword}」相似度低(${m.confidence.toFixed(2)})，改用搜索首选：${picked.name}`);
-      }
-      const out = this._enqueue(picked, user);
-      // 匹配度不高时把候选一并带回去：界面能提示"不是这首？下面还有"，
-      // 但**不阻塞播放** —— 先放上才是重点。
-      if (out && out.ok && lowConf) {
-        out.lowConfidence = true;
-        out.candidates = m.candidates.filter((s) => s !== picked).slice(0, 7);
-      }
-      return out;
+      return this._enqueueBestMatch(keyword, r.songs, user);
     } catch (e) {
       this.log('[engine] 搜索失败', e.message);
       return this.notify('error', `搜索失败：${e.message}`);
     }
+  }
+
+  /**
+   * 跨源点歌（`auto`）：网易云与酷狗**并行搜**，再挑一条。
+   *
+   * 为什么并行、为什么不是"先搜 A，失败再搜 B"：
+   *   · 并行时总延迟 ≈ 慢的那个（实测每个源 200~500ms），比"串行 + 失败重试"
+   *     （最坏 2 倍 + 一次空等）好得多；
+   *   · "先搜 A 再搜 B"只在 A **没结果**时救场，而真实痛点是"A 搜到了但不能播 /
+   *     不是原唱"—— 那种失败在搜索阶段根本看不到（网易云会员曲照样返回结果，
+   *     酷狗对没版权的歌返回一堆翻唱）。所以**必须两边都搜**才知道"有没有别的选择"。
+   *
+   * 挑的规则见 `_pickAcrossSources`：**同一首 → 走有权益的源；不同首 → 谁更匹配谁上**。
+   */
+  async _orderAuto(keyword, user) {
+    const [n, k] = await Promise.all([
+      this.netease.search(keyword, { limit: 8 })
+        .catch((e) => ({ ok: false, msg: e.message, songs: [] })),
+      (this.kugou
+        ? this.kugou.search(keyword, { limit: 8 })
+        : Promise.resolve({ ok: false, msg: '酷狗通道未启用', songs: [] }))
+        .catch((e) => ({ ok: false, msg: e.message, songs: [] })),
+    ]);
+    const nSongs = (n.ok && n.songs) || [];
+    const kSongs = (k.ok && k.songs) || [];
+
+    if (!nSongs.length && !kSongs.length) {
+      this.stats.rejected++;
+      const errs = [];
+      if (!n.ok) errs.push(`网易云：${n.msg}`);
+      if (!k.ok) errs.push(`酷狗：${k.msg}`);
+      const why = errs.length ? errs.join('；') : `两个曲库都没搜到「${keyword}」`;
+      this.notify('reject', `${user.uname}：${why}`);
+      return { ok: false, reason: (n.ok || k.ok) ? 'notfound' : 'limit', msg: why, candidates: [] };
+    }
+
+    const vips = await this._vipStates();
+    const pick = this._pickAcrossSources(keyword, nSongs, kSongs, vips);
+    const lowConf = pick.confidence < 0.45;
+    if (lowConf) {
+      this.log(`[engine] 点歌「${keyword}」相似度低(${pick.confidence.toFixed(2)})，改用搜索首选：${pick.best.name}`);
+    }
+    const out = this._enqueue(pick.best, user);
+    if (out && out.ok) {
+      /**
+       * 把"为什么是这首"带回去：界面/日志能看出这次走了哪个源、两边是不是同一首。
+       * 不写这一条的话，用户看到"点《晴天》播了周杰伦"只会以为撞对了，
+       * 下次换成翻唱时完全没有线索。
+       */
+      out.source = pick.best.source;
+      out.auto = {
+        from: pick.from,
+        same: pick.same,
+        vip: pick.vip,
+        vips: pick.vips,
+        logins: pick.logins,
+        netease: Number(pick.neteaseConf.toFixed(2)),
+        kugou: Number(pick.kugouConf.toFixed(2)),
+      };
+      if (lowConf) {
+        out.lowConfidence = true;
+        out.candidates = pick.candidates.filter((s) => s !== pick.best).slice(0, 7);
+      }
+      this.log(
+        `[engine] 点歌「${keyword}」→ ${pick.from}《${pick.best.name}》`
+        + `（${pick.same ? '两边都有同一首，走有权益的源' : '按相似度取高'}：`
+        + `网易云 ${pick.neteaseConf.toFixed(2)} / 酷狗 ${pick.kugouConf.toFixed(2)}）`,
+      );
+    }
+    return out;
+  }
+
+  /**
+   * 两个源的候选里挑一条。
+   *
+   * 规则（用户 2026-11-12 定的）：
+   *   1. 只有一边有 → 就用那一边；
+   *   2. 两边都有**同一首**（标题键相等，忽略版本标注）→ 走**有权益的源**：
+   *      优先真正确认有会员的那一边（`_vipOf`：网易云看 `vipType`；酷狗用样本
+   *      VIP 曲试取流），两边都有会员走网易云（音质更高），都判不出来才退回
+   *      按登录态：登录的优先，都没登走酷狗（免登录给全曲，未登录的网易云对
+   *      会员曲只给 45 秒试听）；
+   *   3. 两边是**不同的歌** → 谁的关键词相似度高谁上；分数打平（差距 <0.02）
+   *      时仍然归到有权益的源 —— 打平说明两个都"看起来对"，那就选能放全曲的。
+   *
+   * 为什么"同一首"用标题键而不是标题相似度：相似度是给"像不像"打分的，
+   * 这里要回答的是"是不是同一首歌的两种版本"，括号里的 `(DJ版)`/`(Live)`
+   * 必须忽略，否则同一首会被判成两首、然后按相似度把 DJ 版排到前面。
+   */
+  _pickAcrossSources(keyword, nSongs, kSongs, vipStates) {
+    const kw = String(keyword || '').trim().toLowerCase();
+    const pn = this._pickBestMatch(keyword, nSongs);
+    const pk = this._pickBestMatch(keyword, kSongs);
+    /**
+     * 「有权益的源」= **真正确认有会员**的那一边，不是"登录了的那一边"：
+     *   · 一边 yes、一边 no/unknown → 走 yes（这才是用户要的"哪边有 VIP 走哪边"）；
+     *   · 两边都 yes → 网易云（320k/aac，音质比酷狗的 128k 高）；
+     *   · 都问不出结论（`unknown`）→ 退回按登录态判断：登录的优先，都没登走酷狗
+     *     （免登录就给全曲；未登录的网易云对会员曲只给 45 秒）。
+     *
+     * 为什么 `unknown` 不当作 `no`：酷狗那边只有"样本曲取流"一个判据，
+     * 网络抖一下就会拿不到答案；把它当成"没会员"，会让有会员的用户被踢去只能试听的源。
+     */
+    const nLogin = !!(this.netease && this.netease.isLoggedIn);
+    const kLogin = !!(this.kugou && this.kugou.isLoggedIn);
+    const rank = { yes: 2, unknown: 1, no: 0 };
+    const nVip = (vipStates && vipStates.netease) || 'unknown';
+    const kVip = (vipStates && vipStates.kugou) || 'unknown';
+    const vip = rank[nVip] === rank[kVip]
+      ? (nLogin ? 'netease' : 'kugou')
+      : (rank[nVip] > rank[kVip] ? 'netease' : 'kugou');
+    const same = !!(pn.best && pk.best && titleKey(pn.best.name) === titleKey(pk.best.name));
+
+    let best = null;
+    let from = '';
+    if (pn.best && pk.best) {
+      if (same || Math.abs(pn.confidence - pk.confidence) < 0.02) {
+        from = vip;
+        best = vip === 'netease' ? pn.best : pk.best;
+      } else if (pn.confidence > pk.confidence) {
+        from = 'netease'; best = pn.best;
+      } else {
+        from = 'kugou'; best = pk.best;
+      }
+    } else if (pn.best) {
+      from = 'netease'; best = pn.best;
+    } else if (pk.best) {
+      from = 'kugou'; best = pk.best;
+    }
+
+    const merged = [...nSongs, ...kSongs]
+      .map((s) => ({ s, sim: this._scoreSong(kw, s) }))
+      .sort((a, b) => b.sim - a.sim)
+      .map((x) => x.s);
+
+    return {
+      best,
+      from,
+      same,
+      vip,
+      vips: { netease: nVip, kugou: kVip },
+      logins: { netease: nLogin, kugou: kLogin },
+      confidence: best ? this._scoreSong(kw, best) : 0,
+      neteaseConf: pn.confidence,
+      kugouConf: pk.confidence,
+      candidates: merged,
+    };
+  }
+
+  /**
+   * 跨源搜索（控制台「只搜索 · 自动」用）：两边都搜，按关键词相似度合并排序。
+   *
+   * 与 `_orderAuto` 的区别只在"要不要入队"：这里把两个源的结果**一起列出来**
+   * 让用户自己挑 —— 界面上每条都带着自己的 `source`，点哪条就用哪条播。
+   */
+  async searchAll(keyword, { limit = 10 } = {}) {
+    const kw = String(keyword || '').trim();
+    if (!kw) return { ok: true, songs: [], total: 0, sources: {} };
+    const n = Math.max(3, limit);
+    const [a, b] = await Promise.all([
+      this.netease.search(kw, { limit: n }).catch((e) => ({ ok: false, msg: e.message, songs: [] })),
+      (this.kugou ? this.kugou.search(kw, { limit: n }) : Promise.resolve({ ok: false, msg: '酷狗通道未启用', songs: [] }))
+        .catch((e) => ({ ok: false, msg: e.message, songs: [] })),
+    ]);
+    const lk = kw.toLowerCase();
+    const nList = (a.ok && a.songs) || [];
+    const kList = (b.ok && b.songs) || [];
+    const scored = (arr) => arr.map((s) => ({ s, sim: this._scoreSong(lk, s) }))
+      .sort((x, y) => y.sim - x.sim);
+    /**
+     * 两家的**名额**：结果全按分数排时，同名曲会把另一个源整段挤掉 ——
+     * 实测搜「无中生有 HOYO」，网易云那 8 条同名歌（0.85）把酷狗的正确答案
+     * 挤到第 11 名外，列表里一条酷狗都没有，用户以为"自动只搜网易云"。
+     * 既然规则是"两边都搜"，就保证每个有结果的源至少占 ceil(limit / 源数) 个名额，
+     * 剩下的再按分数补；合并后仍按分数排，只是不再允许一家通吃。
+     */
+    const groups = [scored(nList), scored(kList)].filter((g) => g.length);
+    const per = groups.length ? Math.max(1, Math.ceil(limit / groups.length)) : limit;
+    const songs = groups
+      .flatMap((g) => g.slice(0, per))
+      .concat(groups.flatMap((g) => g.slice(per)))
+      .sort((x, y) => y.sim - x.sim)
+      .slice(0, limit)
+      .map((x) => x.s);
+    return {
+      ok: !!(a.ok || b.ok),
+      songs,
+      total: songs.length,
+      msg: [a.ok ? '' : `网易云：${a.msg}`, b.ok ? '' : `酷狗：${b.msg}`].filter(Boolean).join('；'),
+      sources: {
+        netease: { ok: !!a.ok, count: ((a.songs) || []).length },
+        kugou: { ok: !!b.ok, count: ((b.songs) || []).length },
+      },
+    };
+  }
+
+  /**
+   * 从搜索结果里挑一首入队。**网易云与酷狗共用这一条**（2026-11-12 抽出来）。
+   *
+   * 为什么不各写一份：两个源的曲库不同，但"该怎么挑"必须是同一个口径 ——
+   * 同一句关键词在网易云挑的是原唱、在酷狗挑了 Live 版，用户只会觉得酷狗不准，
+   * 而不是"两个源用两套匹配规则"。
+   *
+   * 取哪一首：**低置信度时信任搜索引擎自己的相关度排序**。
+   *
+   * 我这套相似度是二元组 Dice，遇到「假面骑士build」这种中日英混写、
+   * 或者「孤勇」这种半截标题就算不出来（置信度很低）。而两个平台的搜索
+   * 用的都是一套成熟的相关度模型，它的第 1 条通常就是对的。
+   * 所以：我确信时用我的判断（能纠正"标题像但歌手不对"），
+   * 我不确信时就用它的第 1 条 —— 而不是把选择甩回给用户。
+   * 用户要的是"自动匹配一个最合适的然后开始播放"。
+   */
+  _enqueueBestMatch(keyword, songs, user) {
+    const m = this._pickBestMatch(keyword, songs);
+    const lowConf = m.confidence < 0.45;
+    const picked = lowConf ? songs[0] : m.best;
+    if (lowConf) {
+      this.log(`[engine] 点歌「${keyword}」相似度低(${m.confidence.toFixed(2)})，改用搜索首选：${picked.name}`);
+    }
+    const out = this._enqueue(picked, user);
+    // 匹配度不高时把候选一并带回去：界面能提示"不是这首？下面还有"，
+    // 但**不阻塞播放** —— 先放上才是重点。
+    if (out && out.ok && lowConf) {
+      out.lowConfidence = true;
+      out.candidates = m.candidates.filter((s) => s !== picked).slice(0, 7);
+    }
+    return out;
   }
 
   /** 直接点一首**已经拿到的**歌（搜索结果/候选按钮用，不再重新搜索，避免配错） */
@@ -2642,12 +3015,13 @@ class Engine extends EventEmitter {
      * 连接（浏览器对同一 host 只有 6 条并发）。必须**真的 abort** 掉，
      * 把连接立刻释放，新操作才排得进去。
      *
-     * 链路：AbortController → netease.currentSignal → `_fetch` 的 fetch(signal)
+     * 链路：AbortController → netease/kugou 的 `currentSignal` → `_fetch` 的 fetch(signal)
      * → Node 层直接掐掉 TCP 请求。
      */
     if (this._loadAbort) { try { this._loadAbort.abort(); } catch { /* 忽略 */ } }
     this._loadAbort = new AbortController();
     if (this.netease) this.netease.currentSignal = this._loadAbort.signal;
+    if (this.kugou) this.kugou.currentSignal = this._loadAbort.signal;
 
     // 载入序号：双保险（abort 不保证每个异步分支都立刻退出）
     const seq = ++this._loadSeq;
@@ -2920,6 +3294,27 @@ class Engine extends EventEmitter {
       };
     }
     /**
+     * 酷狗取流。**必须在这个分支里显式接住** —— 下面网易云那段是"其它一切"，
+     * 把酷狗的 32 位 hash 当成网易云歌曲 id 去查，会静默播成另一首歌。
+     *
+     * 实测直链响应头 `206 · accept-ranges: bytes · access-control-allow-origin: *`，
+     * 所以直接交给 `<audio crossorigin="anonymous">`，不需要再加一条本地代理路由
+     * （那个只在 B站那种必须注入 Referer 的源上才有意义）。
+     */
+    if (song.source === 'kugou') {
+      const r = await this.kugou.songUrl(song.id);
+      if (!r.ok) return { ok: false, code: r.code, msg: r.msg || '酷狗取播放地址失败' };
+      return {
+        ok: true,
+        trial: false,
+        url: r.url,
+        br: r.br,
+        level: r.quality || undefined,
+        // 直链里带时间戳、会过期，但落盘之后就不受影响了 —— 与网易云同一种处理
+        cacheSrc: { url: r.url, headers: {} },
+      };
+    }
+    /**
      * 网易云取流。**浏览器 → eapi → legacy → weapi 的优先级已经收进
      * `NeteaseClient.songUrl` 里**，engine 这边只负责翻译结果结构。
      */
@@ -3106,6 +3501,45 @@ class Engine extends EventEmitter {
       }
       return null;
     }
+
+    /**
+     * 酷狗歌词（2026-11-12 加）。
+     *
+     * 与网易云分支同构：**先读磁盘缓存**（歌词与音频同键，一起进「清空缓存」），
+     * 再走平台自己的 LRC（krcs 候选 → base64 解码），最后才按歌名去网易云兜一次。
+     * 判定标准同样是"解析出多少行"，不是"字符串非空" —— 酷狗对纯音乐也会给
+     * 只有 `[ti:]`/`[ar:]` 元信息的 LRC，那种不算拿到歌词。
+     */
+    if (song.source === 'kugou') {
+      const lk = this.cache.lyricKeyFor(song);
+      const cached = lk ? this.cache.getLyrics(lk) : null;
+      if (cached) {
+        this.lastLyricDiag = null;
+        return { source: '缓存', timeline: cached.timeline };
+      }
+      const ly = await this.kugou.lyric(song.id, { duration: song.duration });
+      const timeline = ly.ok && ly.lrc ? buildTimeline(ly) : null;
+      if (timeline && (timeline.lines || []).length) {
+        /**
+         * 成功**必须把上一次的诊断清掉**（2026-11-12 端到端实测抓到）：
+         * 一首歌先失败一次（比如第一次载入时酷狗给了只有元信息的 LRC，
+         * 兜底去网易云又撞上限流），`lastLyricDiag` 会留着那条"操作频繁"；
+         * 紧接着的第二次载入成功了，而这里不清 —— 界面就变成
+         * 「歌词 41 行」和「无歌词：操作频繁」同时成立。
+         * 其它三个源的每条成功路径都是这么做的，这里漏了。
+         */
+        this.lastLyricDiag = null;
+        if (lk) this.cache.putLyrics(lk, timeline, { name: song.name || song.title, source: 'kugou' });
+        return { source: 'kugou', timeline };
+      }
+      this.lastLyricDiag = {
+        song: song.name || song.title,
+        reason: ly.ok ? '这首歌在酷狗的歌词里只有曲目信息、没有正文' : (ly.msg || '取歌词失败'),
+      };
+      const alt = await this._matchNetease(song, { cacheKey: lk });
+      if (alt) return alt;
+      return null;
+    }
     return null;
   }
 
@@ -3264,6 +3698,83 @@ class Engine extends EventEmitter {
     }
     return out;
   }
+
+  /**
+   * 查酷狗登录状态。
+   *
+   * 为什么不像 `neteaseStatus()` 那样顺手要昵称/VIP：酷狗没有免密的账号信息端点
+   * （登录接口只在扫码成功那一瞬间回 `nickname`），硬凑就得再走一遍带签名的
+   * 用户资料接口 —— 未实测，不猜。这里只如实报告「cookie 在不在」和它意味着什么。
+   */
+  async kugouStatus() {
+    const loggedIn = !!this.kugou.isLoggedIn;
+    const vip = loggedIn ? await this._vipOf('kugou') : 'no';
+    const cfg = this.config.kugou || {};
+    // 老配置里没有这两个字段（扫码前就存过 cookie 的），从 cookie 里兜一个 UID 出来
+    const uid = String(cfg.userId || (String(cfg.cookie || '').match(/userid=(\d+)/) || [])[1] || '');
+    return {
+      loggedIn,
+      vip,
+      nickname: String(cfg.nickname || ''),
+      uid,
+      cookieLen: String(cfg.cookie || '').length,
+      msg: loggedIn
+        ? '已登录。酷狗不提供免密查询会员状态；会员曲能否放全曲以实际取流为准。'
+        : '未登录。免费曲照常播全曲；会员曲会明确报「需要付费」。',
+    };
+  }
+
+  /**
+   * 某个源「有没有会员权益」——`'yes'` / `'no'` / `'unknown'`。
+   *
+   * 为什么要单独判：跨源挑歌要在两边都有同一首时优先走**真有权益**的那一边，
+   * 而「登录了」不等于「有会员」（用户实测就是这种情况：网易云有会员、
+   * 酷狗账号能登但没会员）。只按登录态挑，会把一首能放全曲的歌送进只能试听的源。
+   *
+   * 判据：
+   *   · 网易云 —— `account()` 直接给 `vipType`，能确定；
+   *   · 酷狗 —— 没有免密的会员查询接口，只能拿一首**确定是 VIP 的样本曲**
+   *     （`KUGOU_VIP_SAMPLE`）去取流：给了地址 = 这个账号能放 VIP 内容；
+   *     明确回「需要付费」 = 没有；其它失败 = 不知道（不能当成"没有"）。
+   *
+   * 结果缓存 10 分钟：账号查询与取流都是网络请求，不能每点一首歌打一遍。
+   */
+  async _vipOf(source, maxAge = 600000) {
+    const hit = this._vipCache && this._vipCache[source];
+    if (hit && Date.now() - hit.at < maxAge) return hit.v;
+    let v = 'unknown';
+    if (source === 'netease') {
+      if (!(this.netease && this.netease.isLoggedIn)) v = 'no';
+      else {
+        try {
+          const st = await this.neteaseStatus();
+          if (st.vip === true) v = 'yes';
+          else if (st.vipType === 0) v = 'no';
+        } catch (_) { v = 'unknown'; }
+      }
+    } else if (source === 'kugou') {
+      if (!(this.kugou && this.kugou.isLoggedIn)) v = 'no';
+      else {
+        try {
+          const r = await this.kugou.songUrl(KUGOU_VIP_SAMPLE);
+          if (r.ok) v = 'yes';
+          else if (r.code === 403 && /需要付费/.test(String(r.msg || ''))) v = 'no';
+        } catch (_) { v = 'unknown'; }
+      }
+    }
+    this._vipCache = this._vipCache || {};
+    this._vipCache[source] = { at: Date.now(), v };
+    return v;
+  }
+
+  /** 两家各自的权益状态（并行问，一边失败不拖累另一边） */
+  async _vipStates() {
+    const [netease, kugou] = await Promise.all([this._vipOf('netease'), this._vipOf('kugou')]);
+    return { netease, kugou };
+  }
+
+  /** 登录 / 登出之后必须重判：权益跟着账号走，旧缓存不能留 */
+  invalidateVip() { this._vipCache = null; }
 
   clearLyricCache() {
     const r = this.cache.clearLyrics();
@@ -3685,7 +4196,7 @@ class Engine extends EventEmitter {
     const songs = (source === 'history'
       ? this.listHistory(limit).map((it) => it.song)
       : (this.config.savedPlaylist || []).map((it) => it.song).slice(0, limit)
-    ).filter((s) => s && (s.source === 'netease' || s.source === 'bilibili'));
+    ).filter((s) => s && (s.source === 'netease' || s.source === 'bilibili' || s.source === 'kugou'));
 
     if (!songs.length) {
       return {
@@ -4163,6 +4674,11 @@ class Engine extends EventEmitter {
         coolLeft: this.netease.coolLeft ? this.netease.coolLeft() : 0,
         searchCache: this.netease.searchCacheStats ? this.netease.searchCacheStats().size : 0,
       },
+      /**
+       * 酷狗登录态（2026-11-12 加）：界面的 pill 与「点歌走哪个源」的解释都靠它。
+       * 只报"有没有登录"，不报会员 —— 酷狗没有免密的会员查询端点。
+       */
+      kugou: { loggedIn: !!(this.kugou && this.kugou.isLoggedIn) },
       playerDevices: this.playerDevices || [],
       blacklist: this.blacklist.list(),
       /** 被用户禁止自动匹配歌词的曲目（2026-10-16，见 config.lyrics.banned） */

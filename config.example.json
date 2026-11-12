@@ -9,6 +9,15 @@
     "encodeType": "aac",
     "defaultSource": "netease"
   },
+  "kugou": {
+    "timeout": 8000,
+    "cookie": "",
+    "nickname": "",
+    "userId": ""
+  },
+  "search": {
+    "crossSource": true
+  },
   "bilibili": {
     "cookie": "",
     "roomId": "",

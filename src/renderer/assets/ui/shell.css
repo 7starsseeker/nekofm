@@ -273,6 +273,21 @@ html[data-v2] .v2face #localList { max-height: 340px; overflow: auto; }
 .v2-notes .tip { font-size: 12px; color: #8fa2b7; line-height: 1.7; padding: 4px 0 6px; }
 .v2-notes:not([open]) .tip { display: none; }
 
+/* --------------------------------------------------- 不许折进入的实时读数 */
+/* 登录状态是"要一眼看见"的东西：它被折进「说明」之后，用户看到的是两张
+   都写着"可选"的卡，实际登没登录得点开折叠才知道。加 `.v2-keep` 让外壳跳过它
+   （见 shell.js 第 3 步），这里只负责让它看起来像一条**状态行**而不是一段说明。 */
+.v2-status {
+  margin: 8px 0 2px;
+  padding: 6px 10px;
+  border-left: 3px solid #2b3a4c;
+  border-radius: 4px;
+  background: #141b24;
+  color: #c9d6e4;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 /* ------------------------------------------------------------ 窄窗适配 */
 /* 窗口最小宽度是 920（src/main/index.js 的 minWidth）：
    920 - 156 - 344 = 420 给内容，两列放不下 ⇒ 收窄导航与队列栏。 */
