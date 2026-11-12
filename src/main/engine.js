@@ -33,6 +33,69 @@ const { DEMO_REQUESTER } = require('../core/demo');
 const dataDir = () => (process.env.NEKOFM_DATA || configPath().dir);
 
 /**
+ * 把"看着像歌词、格式却不是 LRC"的输入掰成 `[mm:ss.xxx]` 行。
+ *
+ * 为什么需要（2026-11-13 用户实测）：拿导出的 `.txt` 去配词，行首是
+ * `[00:01,550 - 00:03,267] 正文 ｜ 译文` —— 逗号小数 + 时间区间，不是 LRC 的
+ * `[mm:ss.xx]`。`parseLrc` 一行都认不出，"选了文件却什么都没发生"。
+ * 换成 SRT（`00:00:01,550 --> 00:00:03,267`）同理。
+ *
+ * 认得三种输入：
+ *   1. SRT 块：时间行 + 若干文本行（第一行原文，其余并成译文）
+ *   2. `[起 - 止]` 区间行：逗号或点做小数都行，`｜` / `|` 之后算译文
+ *   3. 已经是 LRC → 原样返回（一个字都不动，免得把自动匹配那条路带歪）
+ *
+ * @param {string} raw 原始文件内容
+ * @returns {{lrc: string, tlyric: string}}
+ */
+function coerceLyricText(raw) {
+  const src = String(raw == null ? '' : raw).replace(/^\uFEFF/, '');
+  /** 秒 → `[mm:ss.xxx]` */
+  const stamp = (n) => {
+    const mm = Math.floor(n / 60);
+    const ss = n - mm * 60;
+    return `[${String(mm).padStart(2, '0')}:${ss.toFixed(3).padStart(6, '0')}]`;
+  };
+
+  // 1) SRT
+  if (/^\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->/m.test(src)) {
+    const main = [];
+    const trans = [];
+    for (const block of src.split(/\r?\n\s*\r?\n/)) {
+      const ls = block.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+      if (!ls.length) continue;
+      const head = /^\d+$/.test(ls[0]) ? 1 : 0;          // 序号行有没有都行
+      const tm = /^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->/.exec(ls[head] || '');
+      if (!tm) continue;
+      const body = ls.slice(head + 1);
+      if (!body.length) continue;
+      const t = stamp((Number(tm[1]) * 3600) + (Number(tm[2]) * 60) + Number(tm[3]) + Number(`0.${tm[4]}`));
+      main.push(t + body[0]);
+      if (body.length > 1) trans.push(t + body.slice(1).join(' '));
+    }
+    if (main.length) return { lrc: main.join('\n'), tlyric: trans.join('\n') };
+  }
+
+  // 2) `[起 - 止]` 区间行
+  if (/^\s*\[\d{1,2}:\d{2}[,.]\d{1,3}\s*[-–~]\s*\d{1,2}:\d{2}[,.]\d{1,3}\]/m.test(src)) {
+    const main = [];
+    const trans = [];
+    for (const line of src.split(/\r?\n/)) {
+      const m = /^\s*\[(\d{1,2}):(\d{2})[,.](\d{1,3})[^\]]*\]\s*(.*)$/.exec(line);
+      if (!m) continue;
+      const body = m[4].split(/\s*[｜|]\s*/);
+      if (!body[0] || !body[0].trim()) continue;
+      const t = stamp((Number(m[1]) * 60) + Number(m[2]) + Number(`0.${m[3]}`));
+      main.push(t + body[0].trim());
+      if (body.length > 1) trans.push(t + body.slice(1).join(' ').trim());
+    }
+    if (main.length) return { lrc: main.join('\n'), tlyric: trans.join('\n') };
+  }
+
+  return { lrc: src, tlyric: '' };
+}
+
+/**
  * 解析缓存根目录。
  * 配置里留空 → `<程序目录>/data/cache`（**绝不默认写系统盘**）。
  * 填了绝对路径 → 用用户的（比如放到大盘上：D:/NekoFM/cache）。
@@ -3942,6 +4005,108 @@ class Engine extends EventEmitter {
     this.lyricRev++;
     this.emit('change');
     return ly;
+  }
+
+  /**
+   * 「手动配词」（2026-11-13，用户要求）：把用户自己选的 `.lrc` 文本配给某一首。
+   *
+   * 用户原话：「如果要手动找到对应的缓存文件并且把歌词文件复制过去还要改名就很麻烦」
+   * —— 所以这里只做一件事：**让"这一首现在用这份词"变成一次点击**。
+   *
+   * 为什么必须落到磁盘、不能只改内存里的 `lyricTimeline`：
+   * 歌词的唯一真相一直在磁盘上，`resolveLyrics` 每次切歌都从那里读。
+   *   · 在线曲（网易云 / B站 / 酷狗）：歌词缓存 `<cache>/lyrics/<key>.json`
+   *     —— `resolveLyrics` 的第一步就是 `cache.getLyrics(key)`
+   *   · 本地曲：音频同目录的旁车 `<base>.lrc` —— `local.lyrics()` 的首选来源
+   * 只改内存的话，切走再切回来就没了，属于"看起来成功"。
+   *
+   * 键与曲目二选一：缓存列表的行里只有键（`cacheList` 返回的 `m.key`，与
+   * `lyricKeyFor` 同源），曲库里的行里只有 song 对象。
+   *
+   * @param {{key?:string, song?:object, text?:string, filename?:string}} [o]
+   * @returns {{ok:boolean, key?:string|null, lines?:number, applied?:boolean,
+   *            unbanned?:boolean, where?:string, msg?:string}}
+   */
+  lyricBind({ key = null, song = null, text = '', filename = '', name: givenName = '' } = {}) {
+    // BOM 必须剥掉，否则第一行的时间标签匹配不上（`\uFEFF[00:12.34]`）
+    const raw = String(text == null ? '' : text).replace(/^\uFEFF/, '');
+    if (!raw.trim()) return { ok: false, msg: '文件是空的' };
+
+    // 曲目名只用来做提示文案和落盘的 meta.name：界面已经知道行上的曲名，
+    // 从已缓存列表配词时传进来，比用文件名（`BV1LD42137kt`）像样得多
+    const name = (song && (song.name || song.title))
+      || String(givenName || '').trim()
+      || filename.replace(/\.[^.]+$/, '')
+      || key || '这首';
+    // 用户手上的歌词千奇百怪：SRT、`[起 - 止]` 区间、标准 LRC 都得吃下来，
+    // 先归一成 LRC 再交给同一条解析链（auto 匹配那条路不受影响）
+    const coerced = coerceLyricText(raw);
+    const timeline = buildTimeline({ lrc: coerced.lrc, tlyric: coerced.tlyric || undefined });
+    const lines = (timeline && timeline.lines) || [];
+    if (!lines.length) {
+      /**
+       * 纯文本歌词（没有 `[mm:ss.xx]`）**不能**当成功：写进缓存后
+       * `getLyrics` 会因为它没有 timeline 而返回 null，界面只会显示"无歌词"，
+       * 用户完全看不出是自己选错了文件。这里说清楚。
+       */
+      return {
+        ok: false,
+        msg: '没解析出带时间轴的歌词行 —— 支持 LRC（`[mm:ss.xx]` 行首标签）和 SRT（`00:00:01,550 --> ...`）；纯文本歌词配上去等于没配',
+      };
+    }
+
+    // ---- 1) 落盘
+    const isLocal = !!(song && song.source === 'local' && song.file);
+    let where = '';
+    if (isLocal) {
+      if (!this.local || typeof this.local.saveLyrics !== 'function') {
+        return { ok: false, msg: '本地曲库没有启用，写不了旁车歌词' };
+      }
+      // overwrite：**这是用户显式点的"用这份"**，不覆盖就等于没生效；旧文件先备份
+      const r = this.local.saveLyrics(song.file, timeline, { enabled: true, overwrite: true });
+      if (!r.ok) return { ok: false, msg: r.msg || '写入旁车歌词失败（目录可能只读）' };
+      where = (r.written && r.written[0]) || (r.skipped && r.skipped[0]) || '';
+    } else {
+      const k = key || this.cache.lyricKeyFor(song);
+      if (!k) return { ok: false, msg: '算不出这一首的歌词缓存键（缺 id / cid / bvid）' };
+      const put = this.cache.putLyrics(k, timeline, { name, source: 'manual' });
+      if (!put.ok) return { ok: false, msg: put.msg || '写入歌词缓存失败' };
+      key = k;
+      where = put.file;
+    }
+
+    /**
+     * ---- 2) 顺手解除"禁止自动匹配"。
+     *
+     * 手动词已经躺在磁盘上了，禁令继续留着只会让 `resolveLyrics` 在
+     * **切歌时**直接返回 null（它的第一行就是查禁令），表现成"配了词却不显示"。
+     * 禁令的语义是"不许自动匹配到错的那份"，用户手动指定显然不在此列。
+     */
+    const keys = new Set([key, song ? this.lyricBanKey(song) : null].filter(Boolean));
+    let unbanned = false;
+    const banList = this.syncLyricBanToConfig().banned.slice();
+    const kept = banList.filter((e) => !(e && keys.has(e.key)));
+    if (kept.length !== banList.length) {
+      this.syncLyricBanToConfig(kept);
+      unbanned = true;
+    }
+
+    // ---- 3) 正在播的就是这一首 → 立刻换上（不然要等下一首才看见，像没生效）
+    const t = this.track;
+    const cur = !!(t && (keys.has(this.cache.lyricKeyFor(t)) || keys.has(this.lyricBanKey(t))));
+    if (cur) {
+      this.lyricTimeline = timeline;
+      this.lyricSource = 'manual';
+      this.lastLyricDiag = null;
+      this.lyricRev++;
+    }
+
+    this.notify('info',
+      `《${name}》已配上手动词：${lines.length} 行`
+      + (unbanned ? '（同时解除了它的自动匹配禁令）' : '')
+      + (cur ? '，正在播的这首已经换上' : '，下次播到这首时生效'));
+    this.emit('change');
+    return { ok: true, key: key || null, lines: lines.length, applied: cur, unbanned, where };
   }
 
   // ================================================ 单曲缓存管理（2026-09-26）

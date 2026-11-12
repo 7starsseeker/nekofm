@@ -138,6 +138,22 @@
         if (full) b.style.borderColor = '#2c8a4b';
         acts.push({ btn: b });
       }
+
+      /**
+       * 「配词」（2026-11-13 用户要求）：选一个 `.lrc` 文件，手动配给这一首。
+       *
+       * 为什么每一行都要有：自动匹配**一定会**有匹配不到 / 匹配错的曲目
+       * （B站搬运、翻唱、同名的不同版本）。用户原来的做法是"自己找到缓存文件、
+       * 复制歌词过去、再改名"——那三步全靠手，且要找的目录路径他自己还得先查。
+       *
+       * 本地曲也放这个按钮：那边写的是音频旁边的旁车 `.lrc`（引擎里分流），
+       * 对用户来说动作是同一个 —— 「这一首用这份词」。
+       */
+      if (window.__nekofmPickLyricFile) {
+        acts.push({ btn: mk('配词', '选一个 .lrc 文件，手动配给这一首（不用自己找缓存文件改名）', () => {
+          window.__nekofmPickLyricFile({ song: it.song, name: it.name || '' });
+        }) });
+      }
       // 拉黑粒度：菜单里展开成 4 条（原来是行内的下拉框，占位又不直观）
       const sel = document.createElement('select');
       for (const [v, t] of [['song', '歌曲'], ['keyword', '关键词'], ['artist', '歌手'], ['bvid', 'BV号']]) {

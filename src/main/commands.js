@@ -346,6 +346,37 @@ function createCommandHandler({ engine, saveConfig = () => {}, hooks = {}, onCon
       case 'cacheSongDrop': return engine.cacheDrop(cmd.song);
       /** 手动缓存某一首（音频 + 歌词）。已缓存的那半会自动跳过，相当于"补齐缺失的部分" */
       case 'cacheSongFetch': return engine.cacheFetch(cmd.song);
+      /**
+       * 「手动配词」（2026-11-13）：把用户自己选的 `.lrc` 文本写进这一首。
+       *
+       * 文本由**渲染进程**读好再传上来（`<input type="file">` + `arrayBuffer`），
+       * 主进程不弹原生对话框 —— 这样 headless（没有 Electron dialog）也能用，
+       * 而且编码判定（UTF-8 / GBK）在浏览器里用 `TextDecoder` 做最省事。
+       *
+       * 会改配置里的「歌词禁令」名单，所以成功后必须落盘（同 lyricAutoUnban）。
+       */
+      case 'lyricBind': {
+        const r = engine.lyricBind({
+          key: cmd.key || null, song: cmd.song || null,
+          name: cmd.name || '',
+          text: cmd.text || '', filename: cmd.filename || '',
+        });
+        if (r && r.unbanned) saveConfig(engine.config);
+        return r;
+      }
+      /**
+       * 前端诊断留痕（2026-11-13）。
+       *
+       * 为什么非要有：v2 界面把 v1 的 `#log` 盒子藏了起来，`toast()` / `log()`
+       * 全都写进那个看不见的盒子 —— 用户点「配词」失败时"没有任何反应，
+       * 日志也没有记录"，我们这边同样查不到。把前端这条线接到主进程日志总线，
+       * 「审核诊断 → 日志」和 logs.txt 就都能看见了。
+       */
+      case 'clientLog': {
+        const text = String(cmd.text || '').slice(0, 2000);
+        if (text) engine.notify(cmd.level === 'error' ? 'warn' : (cmd.level || 'info'), text);
+        return { ok: true };
+      }
       /** 只清歌词、保留音频（音频几十 MB 要重下，歌词删了几乎零代价） */
       case 'cacheClearLyrics': return engine.cacheClearLyrics();
       /**

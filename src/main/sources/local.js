@@ -226,9 +226,15 @@ class LocalLibrary {
    * 也少一次磁盘写入。老的 .karaoke.lrc 仍然**照常读取**（向后兼容），
    * 所以以前落过盘的歌不受影响。
    *
+   * 2026-11-13：加 `overwrite`（只有「手动配词」会传）。
+   * 默认仍然是"绝不覆盖"——那是**自动匹配**该有的保守；而用户明确挑了一个
+   * `.lrc` 说"用这份"时，跳过就等于什么都没发生。覆盖前把原文件留一份
+   * `<name>.lrc.bak`（已存在就不再覆盖备份，免得把更早的版本冲掉）。
+   *
+   * @param {{enabled?:boolean, overwrite?:boolean}} [opts]
    * @returns {{ok:boolean, written?:string[], skipped?:string[], msg?:string}}
    */
-  saveLyrics(file, timeline, { enabled = true } = {}) {
+  saveLyrics(file, timeline, { enabled = true, overwrite = false } = {}) {
     if (!enabled) return { ok: true, written: [], skipped: [], msg: 'disabled' };
     if (!file || !timeline || !(timeline.lines || []).length) return { ok: false, msg: '没有可保存的歌词' };
     const dir = path.dirname(file);
@@ -245,7 +251,13 @@ class LocalLibrary {
     const skipped = [];
     for (const [p, content, what] of targets) {
       try {
-        if (fs.existsSync(p)) { skipped.push(p); continue; }  // 绝不覆盖已有歌词
+        if (fs.existsSync(p)) {
+          if (!overwrite) { skipped.push(p); continue; }  // 默认绝不覆盖已有歌词
+          // 手动覆盖：先留一份 .bak。**已经存在就不动它** —— 那是上一次覆盖前的原件，
+          // 覆盖掉等于把"用户原本那份"永久丢了。
+          const bak = p + '.bak';
+          if (!fs.existsSync(bak)) { fs.copyFileSync(p, bak); this.log(`[local] 原歌词已备份：${path.basename(bak)}`); }
+        }
         fs.writeFileSync(p, content, 'utf8');
         written.push(p);
         this.log(`[local] 已写入${what}：${path.basename(p)}`);

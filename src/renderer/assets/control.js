@@ -106,10 +106,27 @@
    *
    * 改成写进右下角日志（本来就在显示），不打断任何操作。
    */
-  const toast = (ok, text) => {
-    try { window.__nekofmLog && window.__nekofmLog(ok ? 'info' : 'warn', String(text)); }
-    catch { /* 忽略 */ }
-  };
+    const toast = (ok, text) => {
+      try { window.__nekofmLog && window.__nekofmLog(ok ? 'info' : 'warn', String(text)); }
+      catch { /* 忽略 */ }
+      // v2 界面把 `#log` 盒子藏起来了，光写那儿等于没写：再送一份给主进程日志，
+      // 「审核诊断 → 日志」和 logs.txt 才看得见（2026-11-13 用户实测的坑）。
+      try { api({ action: 'clientLog', level: ok ? 'info' : 'warn', text: String(text) }).catch(() => {}); }
+      catch { /* 页在卸载 */ }
+    };
+
+    /**
+     * 诊断留痕：页面日志 + 主进程日志各写一份。
+     *
+     * 为什么不能只用 `log()`：v2 把 v1 的 `#log` 藏了，用户在界面上永远看不到
+     * —— 2026-11-13「点配词选完文件毫无反应」就是这个看不见的盒子造成的。
+     * 关键分支（尤其是失败分支）走这里，出问题至少有据可查。
+     */
+    const report = (text, level = 'info') => {
+      log(level === 'error' ? 'warn' : level, text);
+      try { api({ action: 'clientLog', level, text: String(text) }).catch(() => {}); }
+      catch { /* 页在卸载 */ }
+    };
 
   /**
    * **页面内确认框**（2026-09-27 替换掉原生 `confirm()`）。
@@ -392,7 +409,9 @@
     $('name').textContent = t ? (t.name || t.title || '—') : '—';
     $('artist').textContent = t ? (t.artistText || (t.artists || []).join(' / ') || '') : '';
     $('srcTag').textContent = t ? ({ netease: '网易云', kugou: '酷狗', local: '本地', bilibili: 'B站' }[t.source] || t.source) : '—';
-    $('lyricTag').textContent = s.lyric ? ('歌词来源 ' + (s.lyric.source || '无')) : '—';
+    $('lyricTag').textContent = s.lyric
+      ? ('歌词来源 ' + ({ manual: '手动配词', 缓存: '缓存' }[s.lyric.source] || s.lyric.source || '无'))
+      : '—';
     /**
      * 封面取**服务端统一解析过**的那一份（`nowPlaying.cover`），不要用原始的 `track.cover`。
      *
@@ -1248,6 +1267,8 @@
           <span class="nm">${m.name || m.key}</span>
           <span class="by">${m.artist || ''}</span>
           <span class="by">${m.mb} MB</span>
+          <button title="选一个 .lrc 文件，手动配给这一条（不用再自己找缓存文件改名）"
+                  @click=${() => pickLyricFile({ key: m.key, name: m.name })}>配词</button>
           <button title="删除这一条缓存（音频 + 对应歌词）"
                   @click=${() => dropCacheKey(m.key)}>删</button>
         </li>`)}
@@ -1297,6 +1318,99 @@
         : '';
     }
   }
+
+  /**
+   * 手动配词（2026-11-13，用户要求）：点一下 → 选 `.lrc` → 这一首就用这份词。
+   *
+   * 为什么用 `<input type="file">` 而不是主进程的 `dialog.showOpenDialog`：
+   *   · 这套界面同时也跑在 headless（纯 Node，没有 Electron dialog）里；
+   *   · 编码判定在浏览器里一行 `TextDecoder` 就能做（LRC 十有八九是 GBK），
+   *     主进程那边还得自己写猜测逻辑。
+   * 前端只负责"读字节 → 解成字符串 → 把文本送上去"，落盘与键的计算全在引擎里。
+   */
+  let lyricBindTarget = null;
+  let lyricFileInput = null;
+
+  /** LRC 编码：先严格 UTF-8，失败退 GBK，再失败就带替换字符的 UTF-8（不静默丢内容） */
+  function decodeLrcBytes(buf) {
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { /* 不是 UTF-8 */ }
+    try { return new TextDecoder('gbk').decode(buf); } catch { /* 浏览器不认 gbk */ }
+    return new TextDecoder('utf-8').decode(buf);
+  }
+
+  function ensureLyricFileInput() {
+    if (lyricFileInput && lyricFileInput.isConnected) return lyricFileInput;
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    // 只做提示，不做拦截：有些 lrc 的文件名后缀千奇百怪，accept 只是让对话框先过滤
+    inp.accept = '.lrc,.txt,text/plain';
+    inp.style.display = 'none';
+    inp.addEventListener('change', async () => {
+      const f = inp.files && inp.files[0];
+      const target = lyricBindTarget;
+      lyricBindTarget = null;
+      inp.value = '';          // 清掉，否则"再选同一个文件"不会触发 change
+      // 这两条早退原来是静默 return —— 2026-11-13 用户实测打包版：「点配词 → 选文件 →
+      // 什么都没发生，日志也没有一行」。静默失败让人只能猜，先留痕再判断。
+      report(`配词：选中 ${f ? f.name : '(没有文件)'}；目标 ${target ? (target.key || (target.song && target.song.name) || '有') : '(丢失)'}`);
+      if (!f || !target) {
+        toast(false, !f ? '没拿到文件（对话框被取消，或系统没把文件交回来）' : '没记住是哪一首，请重新点「配词」');
+        return;
+      }
+      let text = '';
+      try {
+        text = decodeLrcBytes(await f.arrayBuffer());
+      } catch (e) {
+        toast(false, '读取歌词文件失败：' + (e && e.message ? e.message : e));
+        return;
+      }
+      let r;
+      try {
+        r = await api({
+          action: 'lyricBind',
+          key: target.key || null,
+          song: target.song || null,
+          name: target.name || '',
+          text,
+          filename: f.name || '',
+        });
+      } catch (e) {
+        const m = e && e.message ? e.message : e;
+        report('配词请求没发出去：' + m, 'error');
+        toast(false, '配词请求没发出去：' + m);
+        return;
+      }
+      const d = (r && r.result) || {};
+      if (d.ok) {
+        toast(true, `已配词：${d.lines} 行${d.applied ? '（正在播的这首已换上）' : ''}`);
+        // 列表里的"歌词"那半要跟着变（缓存列表 + 曲库/已播放/已保存的角标）
+        refreshCacheList(lastCacheView ? lastCacheView.showAll : false);
+        if (window.__nekofmRefreshLists) { try { window.__nekofmRefreshLists(); } catch { /* 各面自己会重画 */ } }
+      } else {
+        toast(false, d.msg || (r && r.error) || '配词失败');
+      }
+    });
+    inp.addEventListener('cancel', () => {
+      // 对话框被关掉（取消）时 Change 不会来 —— 留一行，好跟"根本没弹"区分开
+      report('配词：文件对话框被取消（没有选中文件）');
+      lyricBindTarget = null;
+    });
+    document.body.appendChild(inp);
+    lyricFileInput = inp;
+    return inp;
+  }
+
+  /**
+   * 打开选文件的对话框。
+   * @param {{key?:string, song?:object, name?:string}} target 缓存列表行给 key，曲库行给 song
+   */
+  function pickLyricFile(target) {
+    report(`配词：打开文件对话框（${target ? (target.key || 'song') : '无目标'}）`);
+    lyricBindTarget = target || null;
+    ensureLyricFileInput().click();
+  }
+  /* 曲库/已播放/已保存那几个面在另一个文件里，跨 IIFE 只能走 window（与 __nekofmRefreshLists 同款） */
+  window.__nekofmPickLyricFile = pickLyricFile;
 
   /**
    * 批量缓存进度：由状态广播（state.cache.prefetch）驱动显示。
@@ -1419,6 +1533,17 @@
             const r = await api({ action: 'localQueue', file: t.file });
             if (r.ok) log('info', `已入队：${t.name}`);
           }}>入队</button>
+          <button title="选一个 .lrc 文件，手动配给这一首（本地曲写到音频旁的旁车歌词）"
+                  @click=${() => {
+                    /* 本地曲的歌词只能靠旁车文件 —— 自动匹配够不到它，这个是主要入口。
+                       跨 IIFE：pickLyricFile 在下方那个闭包里，只能走 window（同 __nekofmRefreshLists）。 */
+                    if (window.__nekofmPickLyricFile) {
+                      window.__nekofmPickLyricFile({
+                        song: { source: 'local', file: t.file, name: t.name },
+                        name: t.name,
+                      });
+                    }
+                  }}>配词</button>
         </li>`)}`, ul);
   }
 
