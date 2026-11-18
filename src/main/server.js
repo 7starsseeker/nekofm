@@ -178,7 +178,19 @@ class AppServer {
     return String(Math.round(rev));
   }
 
-  start() {
+  /**
+   * 绑定 HTTP 服务。**只绑一次，失败就把错误抛给调用方** —— 这里不再自己往后挪端口。
+   *
+   * @param {number} [port] 想绑的端口；传 0 = 让系统给一个空闲端口（救不回固定端口时的退路）
+   * @returns {Promise<number>} 实际绑到的端口
+   *
+   * 为什么挪端口的逻辑搬走了（2026-11-18）：直播姬里的两个浏览器源写死了
+   * `http://127.0.0.1:37821/overlay?only=…`，端口一漂卡片就永久空白。
+   * 之前的实现遇到 EACCES 整段跳 100、遇到 EADDRINUSE 跳 1，端口静默漂走，
+   * 用户只看到"叠加层不显示了"。现在"先救固定端口、救不回再提示换"的决策
+   * 放在 index.js（配合 port-guard.js），这里保持"你说绑哪儿就绑哪儿"的语义。
+   */
+  start(port = this.port) {
     return new Promise((resolve, reject) => {
       this.server = http.createServer((req, res) => this._route(req, res).catch((e) => {
         this.log('[server] 处理失败', e && e.message);
@@ -186,40 +198,33 @@ class AppServer {
         res.end('internal error: ' + (e && e.message));
       }));
 
-      let settled = false;
       /**
-       * **必须用 `server.address().port`，不能用"这次尝试的端口号"。**
+       * **必须用 `server.address().port`，不能用"传进来的端口号"。**
        *
-       * 踩过（2026-09-26）：首选端口被占用时（例如用户自己已经开着一个 NekoFM），
-       * 我们会依次试 37822、37823；而**每次 `listen()` 都会注册一个 once('listening') 回调**，
-       * 真正绑成功那一刻，**之前那些失败尝试的回调会被一并唤起**（用的是各自闭包里那个没绑上的端口号）。
-       * 于是 `resolve(port)` 出去的是**最先那个（被占用的）端口**：
-       *   · `engine.serverBase` 指向**别人的进程** → 取流地址、封面地址、歌词代理全打错端口；
-       *   · 内置测试中心也拿这个 base 发请求 → 测试打到别的实例上（表现为莫名其妙的 403：
-       *     实测就是"打开本地文件后白名单没放行"，其实是在测另一个进程的白名单）。
-       * `address().port` 是"真的绑到哪个端口"的唯一可信来源，跟尝试顺序无关。
+       * 传 0 时端口是内核挑的，只能从 `address()` 读回来；即便传了具体端口，
+       * `address()` 也是"真的绑到哪儿"的唯一可信来源（踩过 2026-09-26：
+       * 多次 listen 时先失败那次的回调也被唤起，resolve 出去的是被占用的那个端口，
+       * `engine.serverBase` 因此指向别人的进程）。
        */
-      this.server.on('listening', () => {
-        if (settled) return;
+      this.server.once('listening', () => {
         const addr = this.server.address();
         const actual = addr && addr.port;
-        if (!actual) return;
-        settled = true;
+        if (!actual) return reject(new Error('listen 成功但读不到端口'));
         this.boundPort = actual;
         this.log(`[server] 已启动 http://${this.host}:${actual}`);
         resolve(actual);
       });
 
-      const tryListen = (port, attempt = 0) => {
-        this.server.once('error', (err) => {
-          if (err.code === 'EADDRINUSE' && attempt < 10) {
-            this.log(`[server] 端口 ${port} 被占用，试 ${port + 1}`);
-            tryListen(port + 1, attempt + 1);
-          } else reject(err);
-        });
-        this.server.listen(port, this.host);
-      };
-      tryListen(this.port);
+      /**
+       * 失败**原样抛出**，由 index.js 决定下一步：
+       *   · `EADDRINUSE` → 占用者是不是我们自己的残留？是就结束它；
+       *   · `EACCES`     → 端口在系统保留段里（Hyper-V / WSL / Docker 的 winnat 排除段，
+       *                    实测每段 100 个端口）→ 重启 winnat 放开；
+       *   · 两者都救不了 → 弹窗告诉用户新地址，再 `start(0)` 让系统给个空闲端口。
+       * 三种处置都在 index.js + port-guard.js，本文件不猜。
+       */
+      this.server.once('error', (err) => reject(err));
+      this.server.listen(port, this.host);
     });
   }
 

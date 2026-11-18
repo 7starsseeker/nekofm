@@ -22,6 +22,7 @@ const { Engine } = require('./engine');
 const { AppServer } = require('./server');
 const { createCommandHandler } = require('./commands');
 const { SelfTest } = require('./selftest');
+const portGuard = require('./port-guard');
 const { NeteaseBrowserFallback } = require('./sources/netease-browser');
 const { AUDIO_EXT } = require('./sources/local');   // 打开文件对话框的扩展名与"能播的格式"共用一份
 const { BiliBrowserSession } = require('../core/bilibili/browser');
@@ -754,6 +755,64 @@ function startBroadcast() {
   }, 100); // 10Hz
 }
 
+// ------------------------------------------------------------------ 端口
+/**
+ * 固定端口救不回来时的最后一步：**把新地址摆到用户面前**，再决定继续还是退出。
+ *
+ * 为什么必须弹窗、不能只写日志：直播姬里那两个浏览器源存的是旧地址，
+ * 换端口后它们会一直空白 —— 用户多半会再报一次"叠加层坏了"。
+ * 弹窗里直接给出能复制的两条 URL，照着填就行。
+ *
+ * @param {number} desired 配置里的端口（期望值）
+ * @param {number} actual  这次真的绑上的端口
+ * @param {{reason?: string}} rescue port-guard 的失败结果
+ * @returns {boolean} true = 用新端口继续；false = 用户选择退出
+ */
+function confirmPortSwitch(desired, actual, rescue) {
+  const base = `http://127.0.0.1:${actual}`;
+  const lines = [];
+  if (rescue && rescue.reason) lines.push(`自动释放失败：${rescue.reason}`, '');
+  lines.push(
+    `本次改用端口 ${actual}。直播姬里的两个浏览器源要改成：`,
+    `  歌词叠加层  ${base}/overlay?only=lyrics`,
+    `  信息卡片    ${base}/overlay?only=info`,
+    '',
+    '想恢复固定端口：关掉占端口的程序（或重启 Windows NAT 驱动 winnat）后重开 NekoFM；',
+    `也可以把 data/config.json 的 server.port 改成另一个固定端口（当前期望 ${desired}）。`,
+  );
+  try {
+    logBus.push('warn', `[nekofm] 端口 ${desired} 不可用，本次改用 ${actual}；`
+      + `直播姬源地址：${base}/overlay?only=lyrics 与 ${base}/overlay?only=info`);
+  } catch { /* 日志总线不可用不影响启动 */ }
+
+  // `--smoke` 是自动化自检：弹窗会把它挂死，所以只记日志、直接用新端口继续
+  if (process.argv.includes('--smoke')) {
+    console.warn('[nekofm] --smoke 模式：跳过端口提示窗，直接用新端口继续');
+    return true;
+  }
+
+  try {
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      title: 'NekoFM 端口被占用',
+      message: `本地端口 ${desired} 用不了，自动释放也没成功。`,
+      detail: lines.join('\n'),
+      buttons: ['用新端口继续', '退出（我先去清端口）'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (choice === 1) {
+      console.warn('[nekofm] 用户选择退出，先清端口再启动');
+      return false;
+    }
+  } catch (e) {
+    // 无 GUI 会话时弹窗会失败 —— 不能因此拦住启动，日志里已经写了新地址
+    console.warn('[nekofm] 端口提示窗打不开：', e && e.message);
+  }
+  return true;
+}
+
 // ------------------------------------------------------------------ 启动
 app.whenReady().then(async () => {
   const { config, existed } = loadConfig();
@@ -1036,7 +1095,53 @@ app.whenReady().then(async () => {
     logBus,   // 让 /logs 窗口能实时收日志（见 logbus.js）
   });
 
-  const port = await server.start();
+  /**
+   * 固定端口优先：直播姬里那两个浏览器源写死了 `http://127.0.0.1:<server.port>/overlay?only=…`，
+   * 端口一漂它们就永久空白（用户以为叠加层坏了）。所以绑不上时按这个顺序处理：
+   *
+   *   1. 先救 —— port-guard.js：占用者是自己的残留就结束它；在系统保留段里就重启 winnat（弹 UAC）；
+   *   2. 救不回来 → 录一条 error 日志 + 弹窗告诉用户新地址，再 `start(0)` 换一个空闲端口；
+   *   3. 用户在弹窗里选"退出"就真的退出（不留没窗口的僵尸进程）。
+   *
+   * 2026-11-18 实发：37821 落在 winnat 保留段 37773–37872，bind 抛 EACCES、窗口永不创建，
+   * 进程攥着单实例锁，用户之后每次双击都只得到"已有实例在运行"。
+   */
+  const desiredPort = config.server.port;
+  let port;
+  try {
+    port = await server.start(desiredPort);
+  } catch (bindErr) {
+    console.warn(`[nekofm] 端口 ${desiredPort} 绑定失败（${bindErr && (bindErr.code || bindErr.message)}），先尝试自动释放`);
+    /**
+     * "占用者是不是我们自己的残留"的判据 —— 只认两种，别的进程一概不碰：
+     *   · 进程名 NekoFM.exe（打包版）；
+     *   · 进程名 electron.exe 且命令行里就是本项目目录（开发态 `electron.exe <项目目录>`）。
+     * **不要**退化成"命令行里含 nekofm 就算"：那样会误杀编辑器、终端、
+     * 以及任何只是在参数里提到本仓路径的 node 进程（port-guard 自测时就误杀过自己）。
+     */
+    const appRoot = String(app.getAppPath() || '').toLowerCase();
+    const own = (info) => {
+      if (!info) return false;
+      const name = String(info.Name || '');
+      if (/^nekofm(\.exe)?$/i.test(name)) return true;
+      if (!/^electron(\.exe)?$/i.test(name)) return false;
+      return !!appRoot && String(info.CommandLine || '').toLowerCase().includes(appRoot);
+    };
+    const rescue = await portGuard.releasePort(desiredPort, {
+      host: config.server.host,
+      log: (...a) => console.warn(...a),
+      own,
+    });
+    if (rescue.released) {
+      console.warn(`[nekofm] 端口 ${desiredPort} 已释放（${rescue.how}），重新绑定`);
+      port = await server.start(desiredPort);
+    } else {
+      console.warn(`[nekofm] 端口 ${desiredPort} 释放失败：${rescue.reason || '未知原因'}`);
+      port = await server.start(0);   // 系统挑一个空闲端口
+      const keepGoing = confirmPortSwitch(desiredPort, port, rescue);
+      if (!keepGoing) { app.exit(0); return; }
+    }
+  }
   engine.serverBase = `http://${config.server.host}:${port}`;
   /* 端口漂移**不许写回配置**。
      踩过（2026-10-25，用户报"直播姬里两个叠加层卡片不显示了"）：
@@ -1489,6 +1594,38 @@ app.whenReady().then(async () => {
       app.exit(bad ? 1 : 0);
     }, seconds * 1000);
   }
+}).catch((e) => {
+  /**
+   * **启动链任何一步失败都必须响亮地死掉，不能留一个没有窗口的僵尸进程。**
+   *
+   * 2026-11-18 实发：`server.start()` 因为 37821 落在 winnat 保留段抛 EACCES，
+   * 这个 promise 没人接 —— Electron 主进程对未处理的 rejection 只打一行
+   * UnhandledPromiseRejectionWarning、**不退出**，于是：
+   *   · 进程活着、窗口从来没建（createWindows 在 await 之后）；
+   *   · 它攥着单实例锁，用户之后每次双击都只得到"已有实例在运行，本次启动直接退出"。
+   * 用户看到的就是"有后台、没窗口、连报错都没有"。
+   * 现在：写日志总线 + 弹窗给出可操作的下一步 + 退出（单实例锁随之释放）。
+   */
+  const detail = (e && (e.stack || e.message)) || String(e);
+  const isPortProblem = /EACCES|EADDRINUSE|listen/i.test(detail);
+  const msg = [
+    'NekoFM 启动失败，窗口没有打开。',
+    '',
+    detail,
+    '',
+    isPortProblem
+      ? [
+          '本地端口被占用或被系统保留（Hyper-V / WSL / Docker 会保留成段的端口）：',
+          '  · 先确认没有另一个 NekoFM 在跑（托盘 / 任务管理器里可能有残留进程）；',
+          '  · 或改 data/config.json 里的 server.port 换一个端口；',
+          '  · 或重启 Windows NAT 驱动（winnat）释放保留段。',
+        ].join('\n')
+      : '完整日志见 data/logs.txt。',
+  ].join('\n');
+  try { logBus.push('error', '[nekofm] 启动失败：' + detail); } catch { /* 日志总线本身失败就只剩弹窗 */ }
+  console.error('[nekofm] 启动失败：', e);
+  try { dialog.showErrorBox('NekoFM 启动失败', msg); } catch { /* headless / 无 GUI 时忽略 */ }
+  app.exit(1);
 });
 
 app.on('window-all-closed', () => { /* 常驻，不随窗口关闭退出 */ });
