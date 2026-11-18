@@ -136,9 +136,9 @@ async function restartWinnat() {
  * @param {{host?: string, log?: Function, own?: (info: object|null) => boolean}} opts
  *   `own(info)` 判"占用者是不是我们自己的残留"。**默认只认进程名 NekoFM.exe**。
  *   别用"命令行里出现 nekofm 就算"那种宽松判据：2026-11-18 自测时它把
- *   `node ...\nekofm\...\port-guard.js "T:\nekofm\..."` 这种**只是提到路径**的进程
+ *   `node …\nekofm\…\port-guard.js "<项目目录>…"` 这种**只是提到路径**的进程
  *   也判成了残留，直接 taskkill —— 编辑器、终端、跑仓里脚本的 node 都会被误杀。
- *   开发态（electron.exe T:\nekofm）由 index.js 传更精确的判据进来。
+ *   开发态（electron.exe <项目目录>）由 index.js 传更精确的判据进来。
  * @returns {Promise<{released: boolean, how?: string, reason?: string, steps: string[]}>}
  *   `steps` 是给日志/弹窗看的人类可读过程（哪一步做了什么、为什么没成）。
  */
